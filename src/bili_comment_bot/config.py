@@ -34,6 +34,7 @@ class PlatformConfig(ConfigModel):
     poll_interval: float = Field(default=30, ge=5)
     refresh_interval: float = Field(default=1800, ge=60)
     max_pages: int = Field(default=20, ge=1, le=200)
+    history_lookback_seconds: int = Field(default=3600, ge=0, le=604800)
 
 
 class AIConfig(ConfigModel):
@@ -55,11 +56,18 @@ class Limits(ConfigModel):
 
 
 class Discovery(ConfigModel):
-    keywords: list[str] = Field(default_factory=list)
+    keywords: list[str] = Field(default_factory=list, max_length=20)
     invite_uids: list[StrictInt] = Field(default_factory=list)
     interval: float = Field(default=1800, ge=60)
     pages_per_keyword: int = Field(default=1, ge=1, le=10)
     videos_per_cycle: int = Field(default=10, ge=1, le=100)
+
+    @field_validator("keywords")
+    @classmethod
+    def bounded_keywords(cls, values):
+        if any(not value.strip() or len(value) > 200 for value in values):
+            raise ValueError("keywords must be nonempty and at most 200 characters")
+        return list(dict.fromkeys(value.strip() for value in values))
 
 
 class Publishing(ConfigModel):
@@ -74,6 +82,10 @@ class EvidenceConfig(ConfigModel):
     max_text_chars: int = Field(default=60000, ge=1000, le=200000)
     transcription_enabled: bool = False
     transcription_model: str = "whisper-1"
+    subtitle_languages: list[str] = Field(
+        default_factory=lambda: ["zh-CN", "ai-zh", "zh-Hans", "en"], min_length=1, max_length=10
+    )
+    comment_sample_size: int = Field(default=20, ge=1, le=100)
 
 
 class Settings(ConfigModel):

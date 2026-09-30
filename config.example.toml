@@ -15,6 +15,7 @@ refresh_interval = 1800
 write_interval = 15
 request_timeout = 20
 max_pages = 20
+history_lookback_seconds = 3600 # 首次启动仅处理最近一小时；边界在首次 HTTP 前持久化
 
 [ai]
 base_url = "https://api.openai.com/v1"
@@ -44,3 +45,7 @@ cache_ttl = 3600
 max_video_seconds = 1800
 transcription_enabled = false
 transcription_model = "whisper-1"
+subtitle_languages = ["zh-CN", "ai-zh", "zh-Hans", "en"] # 依次优先；处理整个视频全部分 P
+comment_sample_size = 20 # 热门评论样本；不代表全部观众
+max_download_mb = 64 # 单视频累计字幕下载预算
+max_text_chars = 60000

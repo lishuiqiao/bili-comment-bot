@@ -64,6 +64,14 @@ class VideoEvidence(Contract):
     published_at: int = Field(default=0, ge=0)
     stats: dict[str, int] = Field(default_factory=dict)
     comments: list[str] = Field(default_factory=list)
+    scope_cids: list[int] = Field(default_factory=list)
+    languages: list[str] = Field(default_factory=list)
+    content_acquired_at: float = Field(default=0, ge=0, allow_inf_nan=False)
+    snapshot_at: float = Field(default=0, ge=0, allow_inf_nan=False)
+    coverage: str = "spoken subtitle content; visual content is not analysed"
+    limitations: list[str] = Field(default_factory=list)
+    status: str = "insufficient"
+    comment_sample: dict = Field(default_factory=dict)
 
     @property
     def usable(self) -> bool:

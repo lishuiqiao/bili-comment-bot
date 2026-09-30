@@ -47,6 +47,10 @@ CREATE TABLE IF NOT EXISTS cache(
  PRIMARY KEY(ns,key));
 CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 INSERT OR IGNORE INTO schema_version VALUES (2);
+CREATE TABLE IF NOT EXISTS collection_jobs(
+ ns TEXT NOT NULL, uid INTEGER NOT NULL, target INTEGER NOT NULL, created REAL NOT NULL,
+ PRIMARY KEY(ns,uid));
+INSERT OR IGNORE INTO schema_version VALUES (3);
 """
 
 
@@ -109,6 +113,20 @@ class Store:
                 await self.db.commit()
 
     async def enqueue_batch(self, events: Iterable[MessageEvent], stream: str, cursor: str):
+        await self.save_collection(events, stream, cursor)
+
+    async def save_collection(
+        self,
+        events: Iterable[MessageEvent],
+        stream: str,
+        cursor: str,
+        *,
+        jobs: Iterable[tuple[int, int]] = (),
+        completed_job: tuple[int, int] | None = None,
+        touched_job: int | None = None,
+        ignored: dict[str, int] | None = None,
+    ):
+        """Page, resume point and newly discovered tasks commit together; no network here."""
         async with self.transaction() as db:
             for event in events:
                 await db.execute(
@@ -120,6 +138,41 @@ class Store:
                 "DO UPDATE SET value=excluded.value",
                 (self.ns, stream, cursor),
             )
+            for uid, target in jobs:
+                await db.execute(
+                    "INSERT INTO collection_jobs SELECT ?,?,?,COALESCE(MAX(created),0)+1 "
+                    "FROM collection_jobs WHERE ns=? ON CONFLICT(ns,uid) "
+                    "DO UPDATE SET target=MAX(collection_jobs.target,excluded.target)",
+                    (self.ns, uid, target, self.ns),
+                )
+            if completed_job:
+                uid, covered = completed_job
+                await db.execute(
+                    "DELETE FROM collection_jobs WHERE ns=? AND uid=? AND target<=?",
+                    (self.ns, uid, covered),
+                )
+            if touched_job is not None:
+                await db.execute(
+                    "UPDATE collection_jobs SET created=(SELECT COALESCE(MAX(created),0)+1 "
+                    "FROM collection_jobs WHERE ns=?) WHERE ns=? AND uid=?",
+                    (self.ns, self.ns, touched_job),
+                )
+            if ignored:
+                await db.execute(
+                    "INSERT INTO audit(ns,action_id,state,reason,created) VALUES(?,?,?,?,?)",
+                    (self.ns, "collection:" + stream, "ignored", json.dumps(ignored), self.clock()),
+                )
+
+    async def dm_jobs(self, limit: int = 100) -> list[tuple[int, int]]:
+        async with self.transaction() as db:
+            rows = await (
+                await db.execute(
+                    "SELECT uid,target FROM collection_jobs WHERE ns=? "
+                    "ORDER BY created,uid LIMIT ?",
+                    (self.ns, limit),
+                )
+            ).fetchall()
+            return [(row[0], row[1]) for row in rows]
 
     async def cursor(self, stream: str) -> str | None:
         async with self.transaction() as db:

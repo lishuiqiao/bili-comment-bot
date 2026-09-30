@@ -61,3 +61,15 @@
 - [原始私信研究](https://github.com/pskdje/bilibili-API-collect/blob/main/docs/message/private_msg.md)核对 `msg[dev_id]` 为 UUIDv4、秒级 timestamp、JSON content、2000 字节限制、双 csrf 字段和 WBI 的 `w_sender_uid/w_receiver_id/w_dev_id` 参数。
 
 固定向量为公开协议材料，非当前口令。其余测试响应由协议字段合成，未复制真实账号数据；错误与中断样例是故障注入。源码仅用于核对协议事实，生产代码为本项目独立实现，不调用上述项目，也不执行下载源码。
+
+## 采集与字幕核对（第 5 轮）
+
+以下补充材料来自联网读取原始仓库文档；其余优先沿用已经下载的本地发布包和研究源码。没有新增可证实的官方稳定性承诺，也没有真实账号请求。
+
+- @ 接口路径及 Cookie 要求来自本地 SDK session.json/session.py；视频通知的 at_time、source_id、subject_id、root_id 来自 [BiliInsight 原始解析器](https://github.com/Shanoa2/BiliInsight/blob/main/src/bilichat/bot/models.py)与监听器。其已有“预算到达后直接更新最新水位”做法可能漏掉积压，本项目独立实现固定 head/完整 watermark/续点分离，没有移植 GPL 代码。[@/回复通知对象研究](https://github.com/pskdje/bilibili-API-collect/blob/main/docs/message/msg.md)主要描述 reply feed 的 cursor.time/is_end 与 at_details；@ 的 at_time 使用 SDK/实际实现约定。认证 @ feed 本身是目标账号依据，非正文名字匹配；显式提及列表非空时再核对 bot UID。root_id=0 的顶层召唤以 source_id 为回复根，缺少 root_id 不猜测。
+- [私信原始协议](https://github.com/pskdje/bilibili-API-collect/blob/main/docs/message/private_msg.md)：get_sessions 的 begin_ts/end_ts 与 session_ts 是微秒，size 最大 100；session_type=4 包含全部类型，处理时仅取类型 1。is_follow 表示 bot 关注对方，不能用它取代发送者关注 bot 的门禁。消息列表倒序，begin_seqno/end_seqno 都不包括边界，size=0 或缺省只返回系统提示，本项目显式 100。receiver_type、双方 UID、msg_status 校验后仅转换有效文本；msg_key 以整数读取再构造字符串事件键，避免浮点精度损失。会话发现带目标序号，不能只回复 last_msg。SDK 简化注释“近三十条”与协议的 size 最大 2000 并不等价，本项目按精确协议的显式分页参数实现。
+- 会话时间是否包含边界缺少一致说明，也没有已核对的 UID 次序游标；实现重叠查询并检查前进，相同时间密集边界无法排空时停止该页，不能自称解决任意碰撞。
+- [视频详情原始研究](https://github.com/pskdje/bilibili-API-collect/blob/main/docs/video/info.md)、[搜索研究](https://github.com/pskdje/bilibili-API-collect/blob/main/docs/search/search_request.md)、[评论列表研究](https://github.com/pskdje/bilibili-API-collect/blob/main/docs/comment/list.md)：view 的 pages 中 CID/page/duration/part 与 stat 各计数；视频分类搜索分页 result，aid 去重、标题 em 高亮转纯文本；reply 使用 type=1、sort=2、pn/ps，携带 page.count 和样本截断信息。仅采热门评论，不宣称总体舆情。
+- [播放器原始研究](https://github.com/pskdje/bilibili-API-collect/blob/main/docs/video/player.md)：player/wbi/v2 返回 aid/cid 和 subtitle.subtitles，轨道 lan/subtitle_url，示例资源主机 aisubtitle.hdslb.com。本轮只允许这个确切 HTTPS 主机；如果新增主机，须新增一手依据与目标限制测试。协议相对地址只补 HTTPS，不沿重定向扩展范围。字幕 body 的 from/to/content 时间片与 SDK 的字幕使用方式一致；全部选定分 P 的轨道取得并校验才标完整，没有替代视觉理解。
+
+搜索、消息、元数据和字幕样例仍是合成契约测试；接口变化、目标路由、分页结束条件与双账号关系方向须列入 live acceptance。错误码通过脱敏 PlatformError.code 保留，与明确无字幕状态分开；未知结构不会当成没有内容。
