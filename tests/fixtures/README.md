@@ -6,4 +6,6 @@
 
 来源与冲突在 `docs/bilibili-interface-notes.md` 逐项记录。WBI 的公开固定向量来自原始研究；补充 UTF-8/空格向量以明确 canonical query 独立计算。HTTP 超时、断连、异常类型、字段缺失和持久化失败样例是人工故障注入。
 
+第 6 轮 `ai_fixtures.py` 预置结构化模型答案和完整视频证据，`test_business_flows.py` 将其接入真实平台适配器的 MockTransport；没有访问模型或 B 站。`evals/safety-v1.jsonl` 的消息是自写用例，规则回归只验证 expected_rule，不能将预置 expected_decision 视为实际模型结果。
+
 后续如加入真实脱敏响应，必须单独标记采集时间、接口、脱敏字段和真实数据性质；不得将现有合成样例改标成 live acceptance。

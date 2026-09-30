@@ -65,6 +65,8 @@ class EvidenceService:
             "languages": config.subtitle_languages,
             "text_budget": config.max_text_chars,
             "duration_budget": config.max_video_seconds,
+            "transcription_enabled": config.transcription_enabled,
+            "transcription_model": config.transcription_model,
         }
         key = "content:" + hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
         if key not in self.tasks:

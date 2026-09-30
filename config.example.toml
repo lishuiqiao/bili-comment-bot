@@ -21,6 +21,12 @@ history_lookback_seconds = 3600 # 首次启动仅处理最近一小时；边界�
 base_url = "https://api.openai.com/v1"
 model = "" # 或用 BILI_BOT_AI_MODEL 环境变量
 temperature = 0.7 # 模型采样；与 persona.warmth 分开
+structured_output = "json_object" # json_schema / prompt，按供应商能力显式选择
+token_parameter = "max_completion_tokens" # 旧兼容供应商可用 max_tokens
+send_temperature = true # 不支持该参数的模型设 false
+retries = 0 # 仅 429/503 可有限重试；平台写入不沿用这个设置
+max_calls_per_minute = 120
+max_input_chars = 120000
 
 [limits]
 dm_per_hour = 5

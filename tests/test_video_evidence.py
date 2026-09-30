@@ -239,6 +239,20 @@ async def test_enabled_transcription_is_explicitly_unavailable_in_this_milestone
             await downloader.close()
 
 
+async def test_negative_subtitle_cache_cannot_hide_new_transcription_strategy(tmp_path):
+    async with read_client(tmp_path, VideoServer(no_subtitle=1)) as (client, store, _):
+        downloader = Downloader(1, 1000, httpx.MockTransport(lambda r: pytest.fail("no track")))
+        service = EvidenceService(client.settings, VideoAPI(client), downloader, store)
+        try:
+            assert (await service.get_video(1)).status == "no_subtitle"
+            client.settings.evidence.transcription_enabled = True
+            with pytest.raises(TranscriptionUnavailable):
+                await service.get_video(1)
+        finally:
+            await service.close()
+            await downloader.close()
+
+
 async def test_cache_corruption_expiry_and_scope_change_reacquire(tmp_path):
     server, calls = VideoServer(), []
 

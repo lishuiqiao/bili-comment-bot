@@ -3,6 +3,8 @@
 import os
 import tomllib
 from pathlib import Path
+from typing import Literal
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, SecretStr, StrictInt, field_validator
 
@@ -44,6 +46,36 @@ class AIConfig(ConfigModel):
     temperature: float = Field(default=0.7, ge=0, le=2, allow_inf_nan=False)
     timeout: float = Field(default=60, gt=0, le=300)
     max_tokens: int = Field(default=1800, ge=200, le=16000)
+    token_parameter: Literal["max_tokens", "max_completion_tokens"] = "max_completion_tokens"
+    structured_output: Literal["json_object", "json_schema", "prompt"] = "json_object"
+    send_temperature: bool = True
+    retries: int = Field(default=0, ge=0, le=2)
+    max_response_bytes: int = Field(default=1000000, ge=1000, le=4000000)
+    max_calls_per_minute: int = Field(default=120, ge=1, le=10000)
+    max_input_chars: int = Field(default=120000, ge=1000, le=500000)
+    allow_insecure_http: bool = False
+
+    @field_validator("base_url")
+    @classmethod
+    def provider_url(cls, value):
+        parts = urlsplit(value)
+        if (
+            parts.scheme not in {"http", "https"}
+            or not parts.hostname
+            or parts.username is not None
+            or parts.password is not None
+            or parts.query
+            or parts.fragment
+            or any(c in value for c in "\\\r\n")
+        ):
+            raise ValueError(
+                "AI base URL must be an HTTP(S) origin/path without credentials or query"
+            )
+        try:
+            _ = parts.port
+        except ValueError:
+            raise ValueError("invalid AI endpoint port") from None
+        return value.rstrip("/")
 
 
 class Limits(ConfigModel):

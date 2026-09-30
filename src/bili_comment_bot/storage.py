@@ -51,6 +51,12 @@ CREATE TABLE IF NOT EXISTS collection_jobs(
  ns TEXT NOT NULL, uid INTEGER NOT NULL, target INTEGER NOT NULL, created REAL NOT NULL,
  PRIMARY KEY(ns,uid));
 INSERT OR IGNORE INTO schema_version VALUES (3);
+CREATE TABLE IF NOT EXISTS workflows(
+ ns TEXT NOT NULL, id TEXT NOT NULL, payload TEXT NOT NULL, PRIMARY KEY(ns,id));
+CREATE TABLE IF NOT EXISTS work_retries(
+ ns TEXT NOT NULL, id TEXT NOT NULL, attempts INTEGER NOT NULL, next_at REAL NOT NULL,
+ PRIMARY KEY(ns,id));
+INSERT OR IGNORE INTO schema_version VALUES (4);
 """
 
 
@@ -187,20 +193,112 @@ class Store:
         async with self.transaction() as db:
             rows = await (
                 await db.execute(
-                    "SELECT payload FROM inbox WHERE ns=? AND status='pending' "
-                    "ORDER BY created,id LIMIT ?",
-                    (self.ns, limit),
+                    "SELECT inbox.payload FROM inbox LEFT JOIN work_retries r "
+                    "ON inbox.ns=r.ns AND inbox.id=r.id WHERE inbox.ns=? AND status='pending' "
+                    "AND COALESCE(r.next_at,0)<=? ORDER BY inbox.created,inbox.id LIMIT ?",
+                    (self.ns, self.clock(), limit),
                 )
             ).fetchall()
             return [MessageEvent.model_validate_json(row[0]) for row in rows]
 
+    async def event(self, event_id: str) -> MessageEvent | None:
+        async with self.transaction() as db:
+            row = await (
+                await db.execute(
+                    "SELECT payload FROM inbox WHERE ns=? AND id=?", (self.ns, event_id)
+                )
+            ).fetchone()
+            return MessageEvent.model_validate_json(row[0]) if row else None
+
     async def claim_event(self, event_id: str) -> bool:
         async with self.transaction() as db:
             result = await db.execute(
-                "UPDATE inbox SET status='processing' WHERE ns=? AND id=? AND status='pending'",
-                (self.ns, event_id),
+                "UPDATE inbox SET status='processing' WHERE ns=? AND id=? AND status='pending' "
+                "AND NOT EXISTS (SELECT 1 FROM work_retries r WHERE r.ns=inbox.ns "
+                "AND r.id=inbox.id AND r.next_at>?)",
+                (self.ns, event_id, self.clock()),
             )
             return result.rowcount == 1
+
+    async def ready_work(self, key: str) -> bool:
+        async with self.transaction() as db:
+            row = await (
+                await db.execute(
+                    "SELECT next_at FROM work_retries WHERE ns=? AND id=?", (self.ns, key)
+                )
+            ).fetchone()
+            return not row or row[0] <= self.clock()
+
+    async def defer_work(self, key: str, delay: float = 30, *, event=False):
+        async with self.transaction() as db:
+            row = await (
+                await db.execute(
+                    "SELECT attempts FROM work_retries WHERE ns=? AND id=?", (self.ns, key)
+                )
+            ).fetchone()
+            attempts = min((row[0] if row else 0) + 1, 1000000)
+            next_at = self.clock() + min(delay * 2 ** min(attempts - 1, 5), 1800)
+            await db.execute(
+                "INSERT INTO work_retries VALUES(?,?,?,?) ON CONFLICT(ns,id) "
+                "DO UPDATE SET attempts=excluded.attempts,next_at=excluded.next_at",
+                (self.ns, key, attempts, next_at),
+            )
+            if event:
+                await db.execute(
+                    "UPDATE inbox SET status='pending' WHERE ns=? AND id=? AND status='processing'",
+                    (self.ns, key),
+                )
+
+    async def complete_event(self, event_id: str, actions: Iterable[PublishAction]):
+        async with self.transaction() as db:
+            row = await (
+                await db.execute(
+                    "SELECT status FROM inbox WHERE ns=? AND id=?", (self.ns, event_id)
+                )
+            ).fetchone()
+            if not row or row[0] != "processing":
+                raise ValueError("event must be claimed")
+            for action in actions:
+                await db.execute(
+                    "INSERT OR IGNORE INTO actions(ns,id,payload,dependency,updated) "
+                    "VALUES(?,?,?,?,?)",
+                    (self.ns, action.id, action.model_dump_json(), action.dependency, self.clock()),
+                )
+            await db.execute(
+                "UPDATE inbox SET status='done' WHERE ns=? AND id=?", (self.ns, event_id)
+            )
+            await db.execute("DELETE FROM work_retries WHERE ns=? AND id=?", (self.ns, event_id))
+
+    async def put_workflow(self, key: str, payload: str):
+        async with self.transaction() as db:
+            await db.execute(
+                "INSERT OR IGNORE INTO workflows VALUES(?,?,?)", (self.ns, key, payload)
+            )
+
+    async def workflow(self, key: str) -> str | None:
+        async with self.transaction() as db:
+            row = await (
+                await db.execute(
+                    "SELECT payload FROM workflows WHERE ns=? AND id=?", (self.ns, key)
+                )
+            ).fetchone()
+            return row[0] if row else None
+
+    async def quota_available(
+        self, uid: int, channel: Channel, limit: int, whitelist: Collection[int]
+    ) -> bool:
+        if uid in whitelist:
+            return True
+        async with self.transaction() as db:
+            row = await (
+                await db.execute(
+                    "SELECT COUNT(*) FROM quota WHERE ns=? AND uid=? AND channel=? AND "
+                    "(state IN ('reserved','uncertain') OR "
+                    "(state='sent' AND sent_at>? AND sent_at<=?))",
+                    (self.ns, uid, channel, self.clock() - 3600, self.clock()),
+                )
+            ).fetchone()
+            return row[0] < limit
 
     async def finish_event(self, event_id: str, status: str = "done"):
         if status not in {"done", "pending", "blocked", "ignored"}:
