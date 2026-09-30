@@ -6,6 +6,7 @@ import re
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from enum import StrEnum
+from functools import wraps
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -27,6 +28,18 @@ Uc/prcajMKXvkCKFCWhJYJcLkcM2DKKcSeFpD/j6Boy538YXnR6VhcuUJOhH2x71
 nzPjfdTcqMz7djHum0qSZA0AyCBDABUqCrfNgCiJ00Ra7GmRj+YCK1NJEuewlb40
 JNrRuoEUXpabUzGB8QIDAQAB
 -----END PUBLIC KEY-----"""
+
+
+def report_auth_failure(method):
+    @wraps(method)
+    async def wrapped(self, *args, **kwargs):
+        try:
+            return await method(self, *args, **kwargs)
+        except BaseException as error:
+            self._report(error)
+            raise
+
+    return wrapped
 
 
 def correspond_path(timestamp_ms: int) -> str:
@@ -104,10 +117,21 @@ class AuthManager:
         self.lock = asyncio.Lock()
         self.identity_guard = identity_guard
 
+    def _report(self, error):
+        fault = self.transport.auth_fault
+        if fault:
+            fault.notify(error)
+            if self.state and self.state.phase in {
+                RefreshPhase.REFRESH_STARTED,
+                RefreshPhase.CONFIRM_STARTED,
+            }:
+                fault.notify(ReauthenticationRequired())
+
     def _save(self, state: Credentials):
         self.file.save(state)
         self.state = state
 
+    @report_auth_failure
     async def _verify(self, state: Credentials) -> dict:
         data = (
             await self.transport.request(
@@ -132,10 +156,16 @@ class AuthManager:
     async def credentials(self):
         # Hold across a platform operation so its Cookie and CSRF cannot span two generations.
         async with self.lock:
-            if self.state is None:
-                raise LoginExpired()
-            self.state.require_stable()
-            yield self.state
+            try:
+                if self.transport.auth_fault:
+                    self.transport.auth_fault.check()
+                if self.state is None:
+                    raise LoginExpired()
+                self.state.require_stable()
+                yield self.state
+            except BaseException as error:
+                self._report(error)
+                raise
 
     async def verify(self) -> dict:
         async with self.credentials() as state:
@@ -206,6 +236,7 @@ class AuthManager:
             self._save(state)
             return QRStatus.SUCCEEDED
 
+    @report_auth_failure
     async def refresh(self) -> bool:
         async with self.lock:
             state = self.state

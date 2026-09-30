@@ -57,6 +57,17 @@ CREATE TABLE IF NOT EXISTS work_retries(
  ns TEXT NOT NULL, id TEXT NOT NULL, attempts INTEGER NOT NULL, next_at REAL NOT NULL,
  PRIMARY KEY(ns,id));
 INSERT OR IGNORE INTO schema_version VALUES (4);
+CREATE TABLE IF NOT EXISTS discovery_jobs(
+ ns TEXT NOT NULL, aid INTEGER NOT NULL, next_at REAL NOT NULL, created REAL NOT NULL,
+ PRIMARY KEY(ns,aid));
+CREATE INDEX IF NOT EXISTS discovery_due ON discovery_jobs(ns,next_at,created);
+CREATE TABLE IF NOT EXISTS workflow_states(
+ ns TEXT NOT NULL, id TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'pending',
+ PRIMARY KEY(ns,id));
+INSERT OR IGNORE INTO workflow_states(ns,id) SELECT ns,id FROM workflows;
+CREATE INDEX IF NOT EXISTS inbox_pending ON inbox(ns,status,created,id);
+CREATE INDEX IF NOT EXISTS actions_pending ON actions(ns,status,updated,id);
+INSERT OR IGNORE INTO schema_version VALUES (5);
 """
 
 
@@ -79,11 +90,15 @@ class Store:
 
     async def open(self):
         self.db = await aiosqlite.connect(self.path, isolation_level=None)
-        self.db.row_factory = aiosqlite.Row
-        await self.db.execute("PRAGMA busy_timeout=10000")
-        await self.db.execute("PRAGMA journal_mode=WAL")
-        await self.db.execute("PRAGMA synchronous=FULL")
-        await self.db.executescript(SCHEMA)
+        try:
+            self.db.row_factory = aiosqlite.Row
+            await self.db.execute("PRAGMA busy_timeout=10000")
+            await self.db.execute("PRAGMA journal_mode=WAL")
+            await self.db.execute("PRAGMA synchronous=FULL")
+            await self.db.executescript(SCHEMA)
+        except BaseException:
+            await self.close()
+            raise
         return self
 
     async def close(self):
@@ -274,6 +289,72 @@ class Store:
             await db.execute(
                 "INSERT OR IGNORE INTO workflows VALUES(?,?,?)", (self.ns, key, payload)
             )
+            await db.execute(
+                "INSERT OR IGNORE INTO workflow_states(ns,id) VALUES(?,?)", (self.ns, key)
+            )
+            await db.execute(
+                "DELETE FROM discovery_jobs WHERE ns=? AND 'discovery:'||aid=?", (self.ns, key)
+            )
+
+    async def enqueue_candidates(self, aids: Iterable[int]):
+        async with self.transaction() as db:
+            for aid in aids:
+                if type(aid) is not int or aid <= 0:
+                    raise ValueError("candidate aid must be positive")
+                await db.execute(
+                    "INSERT OR IGNORE INTO discovery_jobs VALUES(?,?,?,?)",
+                    (self.ns, aid, self.clock(), self.clock()),
+                )
+
+    async def due_candidates(self, limit: int):
+        async with self.transaction() as db:
+            rows = await (
+                await db.execute(
+                    "SELECT j.aid FROM discovery_jobs j LEFT JOIN work_retries r "
+                    "ON r.ns=j.ns AND r.id='discovery:'||j.aid WHERE j.ns=? AND j.next_at<=? "
+                    "AND COALESCE(r.next_at,0)<=? AND NOT EXISTS(SELECT 1 FROM workflows w "
+                    "WHERE w.ns=j.ns AND w.id='discovery:'||j.aid) "
+                    "ORDER BY j.next_at,j.created,j.aid LIMIT ?",
+                    (self.ns, self.clock(), self.clock(), limit),
+                )
+            ).fetchall()
+            return [row[0] for row in rows]
+
+    async def due_workflows(self, limit: int):
+        async with self.transaction() as db:
+            rows = await (
+                await db.execute(
+                    "SELECT w.payload FROM workflows w JOIN workflow_states s "
+                    "ON w.ns=s.ns AND w.id=s.id "
+                    "LEFT JOIN work_retries r ON w.ns=r.ns AND w.id=r.id "
+                    "WHERE w.ns=? AND s.state!='done' AND COALESCE(r.next_at,0)<=? "
+                    "AND NOT EXISTS(SELECT 1 FROM actions a WHERE a.ns=w.ns AND "
+                    "a.id LIKE w.id||':%' "
+                    "AND a.status IN ('uncertain','in_flight','failed','blocked')) "
+                    "ORDER BY COALESCE(r.next_at,0),w.id LIMIT ?",
+                    (self.ns, self.clock(), limit),
+                )
+            ).fetchall()
+            return [json.loads(row[0])["aid"] for row in rows]
+
+    async def discovery_state(self, key: str, state: str):
+        if state not in {"pending", "paused", "done"}:
+            raise ValueError("invalid workflow state")
+        async with self.transaction() as db:
+            await db.execute(
+                "UPDATE workflow_states SET state=? WHERE ns=? AND id=?", (state, self.ns, key)
+            )
+            await db.execute("DELETE FROM work_retries WHERE ns=? AND id=?", (self.ns, key))
+
+    async def reevaluate_candidate(self, aid: int, interval: float):
+        async with self.transaction() as db:
+            await db.execute(
+                "UPDATE discovery_jobs SET next_at=? WHERE ns=? AND aid=?",
+                (self.clock() + interval, self.ns, aid),
+            )
+            await db.execute(
+                "DELETE FROM work_retries WHERE ns=? AND id=?", (self.ns, f"discovery:{aid}")
+            )
 
     async def workflow(self, key: str) -> str | None:
         async with self.transaction() as db:
@@ -328,8 +409,10 @@ class Store:
         async with self.transaction() as db:
             rows = await (
                 await db.execute(
-                    "SELECT payload FROM actions WHERE ns=? AND status='pending' "
-                    "ORDER BY updated,id LIMIT ?",
+                    "SELECT a.payload FROM actions a WHERE a.ns=? AND a.status='pending' "
+                    "AND (a.dependency IS NULL OR EXISTS (SELECT 1 FROM actions d "
+                    "WHERE d.ns=a.ns AND d.id=a.dependency AND (d.status='succeeded' OR "
+                    "(d.ns='sim' AND d.status='simulated')))) ORDER BY a.updated,a.id LIMIT ?",
                     (self.ns, limit),
                 )
             ).fetchall()
@@ -587,3 +670,45 @@ class Store:
                 "DO UPDATE SET payload=excluded.payload,expires=excluded.expires",
                 (self.ns, key, json.dumps(payload), self.clock() + ttl),
             )
+
+    async def counts(self) -> dict:
+        async with self.transaction() as db:
+            result = {}
+            for table, column in (
+                ("inbox", "status"),
+                ("actions", "status"),
+                ("workflow_states", "state"),
+            ):
+                rows = await (
+                    await db.execute(
+                        f"SELECT {column},COUNT(*) FROM {table} WHERE ns=? GROUP BY {column}",
+                        (self.ns,),
+                    )
+                ).fetchall()
+                result[table] = {row[0]: row[1] for row in rows}
+            for table in ("work_retries", "discovery_jobs", "collection_jobs"):
+                result[table] = (
+                    await (
+                        await db.execute(f"SELECT COUNT(*) FROM {table} WHERE ns=?", (self.ns,))
+                    ).fetchone()
+                )[0]
+            return result
+
+    async def action_summaries(self, limit: int = 100, *, uncertain: bool = False) -> list[dict]:
+        async with self.transaction() as db:
+            rows = await (
+                await db.execute(
+                    "SELECT id,status,remote_id,payload FROM actions WHERE ns=? "
+                    "AND (?=0 OR status='uncertain') ORDER BY updated,id LIMIT ?",
+                    (self.ns, int(uncertain), limit),
+                )
+            ).fetchall()
+            return [
+                {
+                    "id": row[0],
+                    "status": row[1],
+                    "remote_id": row[2],
+                    "kind": json.loads(row[3])["kind"],
+                }
+                for row in rows
+            ]

@@ -81,6 +81,9 @@ class Dispatcher:
             if follows != FollowState.YES:
                 reason = "sender does not verifiably follow bot"
         # Settings can change while waiting for a read. Retain the pending live action.
+        fault = getattr(getattr(self.platform, "transport", None), "auth_fault", None)
+        if fault and fault.event.is_set():
+            return ActionStatus(row["status"])
         if self.settings.namespace != self.store.ns:
             return ActionStatus((await self.store.action(action.id))["status"])
         if reason:

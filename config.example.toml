@@ -66,3 +66,9 @@ max_calls_per_video = 20 # 整部多 P 共用，不按分 P 重置
 max_calls_per_minute = 20
 max_response_bytes = 1000000
 max_text_chars = 60000
+
+[runtime]
+worker_interval = 2
+batch_size = 20 # 每个处理入口一次最多认领；不一次排空历史
+shutdown_timeout = 30 # 停止接收新工作后，最多等待在途任务的秒数
+status_interval = 10

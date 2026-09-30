@@ -1,5 +1,7 @@
 """Sanitized platform failures: never retain response text, request URLs or cookies."""
 
+import asyncio
+
 
 class PlatformError(Exception):
     def __init__(self, code: int | None = None):
@@ -37,6 +39,26 @@ class ReauthenticationRequired(PlatformError):
 
 class IdentityMismatch(PlatformError):
     pass
+
+
+AUTH_FAILURES = (LoginExpired, CaptchaRequired, ReauthenticationRequired, IdentityMismatch)
+
+
+class AuthFault:
+    """Sticky, process-local stop signal. Never carries requests or credentials."""
+
+    def __init__(self):
+        self.event = asyncio.Event()
+        self.kind: type[PlatformError] | None = None
+
+    def notify(self, error: BaseException):
+        if isinstance(error, AUTH_FAILURES) and self.kind is None:
+            self.kind = type(error)
+            self.event.set()
+
+    def check(self):
+        if self.kind is not None:
+            raise self.kind()
 
 
 def business_error(code: int) -> PlatformError:

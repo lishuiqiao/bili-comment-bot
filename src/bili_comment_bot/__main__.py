@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 import json
+import logging
 import os
 import tempfile
 from pathlib import Path
@@ -132,8 +133,30 @@ def main():
     parser = argparse.ArgumentParser(prog="bili-comment-bot")
     parser.add_argument("--config", type=Path, default=Path("config.toml"))
     parser.add_argument(
-        "command", choices=["config-check", "demo", "run", "login", "auth-status", "refresh-auth"]
+        "command",
+        choices=[
+            "config-check",
+            "demo",
+            "run",
+            "login",
+            "auth-status",
+            "refresh-auth",
+            "actions",
+            "cancel-action",
+            "verify-action",
+            "status",
+        ],
     )
+    parser.add_argument("--once", action="store_true")
+    parser.add_argument("--namespace", choices=["sim", "live"])
+    parser.add_argument("--action-id")
+    parser.add_argument("--remote-id")
+    parser.add_argument("--note", default="")
+    parser.add_argument("--account-uid", type=int)
+    parser.add_argument("--aid", type=int)
+    parser.add_argument("--liked", action="store_true")
+    parser.add_argument("--uncertain", action="store_true")
+    parser.add_argument("--limit", type=int, default=100)
     args = parser.parse_args()
     if args.command == "demo":
         asyncio.run(demo())
@@ -147,7 +170,7 @@ def main():
         )
     if args.command == "config-check":
         print(f"Configuration valid; mode={settings.namespace}; bot={settings.persona.name}")
-    elif args.command in {"login", "auth-status", "refresh-auth"}:
+    else:
         from .adapters.bilibili.errors import (
             CaptchaRequired,
             IdentityMismatch,
@@ -156,7 +179,42 @@ def main():
         )
 
         try:
-            asyncio.run(auth_command(settings, args.command))
+            if args.command in {"login", "auth-status", "refresh-auth"}:
+                asyncio.run(auth_command(settings, args.command))
+            elif args.command == "run":
+                from .runtime import run_bot
+
+                logging.basicConfig(level=logging.INFO, format="%(message)s")
+                asyncio.run(run_bot(settings, once=args.once))
+            elif args.command == "status":
+                from .observability import read_status
+
+                if args.namespace is None:
+                    parser.error("status requires --namespace sim|live")
+                print(
+                    json.dumps(read_status(settings.data_dir, args.namespace), ensure_ascii=False)
+                )
+            else:
+                from .operations import operate
+
+                if args.namespace is None:
+                    parser.error("operation requires --namespace sim|live")
+                result = asyncio.run(
+                    operate(
+                        settings,
+                        args.namespace,
+                        args.command,
+                        action_id=args.action_id,
+                        remote_id=args.remote_id,
+                        note=args.note,
+                        account_uid=args.account_uid,
+                        aid=args.aid,
+                        liked=args.liked,
+                        uncertain=args.uncertain,
+                        limit=args.limit,
+                    )
+                )
+                print(json.dumps(result, ensure_ascii=False))
         except InstanceInUse:
             parser.exit(2, "此数据目录正在使用；请先停止占用它的登录命令或 bot 服务。\n")
         except ReauthenticationRequired:
@@ -174,8 +232,6 @@ def main():
             parser.exit(
                 2, f"平台操作未完成（{type(error).__name__}）；失效或验证码时请重新扫码。\n"
             )
-    else:
-        parser.exit(2, "Production platform/AI adapters are not connected in this milestone.\n")
 
 
 if __name__ == "__main__":

@@ -10,7 +10,15 @@ from dataclasses import dataclass, field
 import httpx
 
 from ...config import Settings
-from .errors import HTTPFault, NetworkFault, ProtocolFault, RateLimited, business_error
+from .errors import (
+    AuthFault,
+    HTTPFault,
+    NetworkFault,
+    PlatformError,
+    ProtocolFault,
+    RateLimited,
+    business_error,
+)
 
 ORIGINS = {
     "api": "https://api.bilibili.com",
@@ -38,8 +46,17 @@ class RateGate:
 class Packet:
     body: bytes = field(repr=False)
     cookies: dict[str, str] = field(repr=False)
+    auth_fault: AuthFault | None = field(default=None, repr=False)
 
     def envelope(self) -> dict:
+        try:
+            return self._envelope()
+        except PlatformError as error:
+            if self.auth_fault:
+                self.auth_fault.notify(error)
+            raise
+
+    def _envelope(self) -> dict:
         try:
             value = json.loads(self.body)
         except (ValueError, UnicodeError):
@@ -71,8 +88,10 @@ class BiliTransport:
         max_response_bytes: int = 2_000_000,
         read_wait: Callable[[], Awaitable[None]] | None = None,
         write_wait: Callable[[], Awaitable[None]] | None = None,
+        auth_fault: AuthFault | None = None,
     ):
         self.settings = settings
+        self.auth_fault = auth_fault
         # httpx INFO messages include full URLs (QR keys/CSRF can be query parameters).
         logging.getLogger("httpx").setLevel(logging.WARNING)
         logging.getLogger("httpcore").setLevel(logging.WARNING)
@@ -102,6 +121,8 @@ class BiliTransport:
         data: dict | None = None,
         publish_guard: Callable[[], None] | None = None,
     ) -> Packet:
+        if self.auth_fault:
+            self.auth_fault.check()
         if (
             origin not in ORIGINS
             or method not in {"GET", "POST"}
@@ -123,6 +144,8 @@ class BiliTransport:
         }
         async with self.semaphore:
             await (self.write_wait() if method == "POST" else self.read_wait())
+            if self.auth_fault:
+                self.auth_fault.check()
             if publish_guard:
                 publish_guard()
             request = self.client.build_request(
@@ -141,7 +164,7 @@ class BiliTransport:
                             body.extend(chunk)
                             if len(body) > self.max_response_bytes:
                                 raise ProtocolFault()
-                        return Packet(bytes(body), dict(response.cookies.items()))
+                        return Packet(bytes(body), dict(response.cookies.items()), self.auth_fault)
                     finally:
                         await response.aclose()
             except (httpx.HTTPError, TimeoutError):

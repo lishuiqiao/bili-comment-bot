@@ -127,6 +127,13 @@ class Publishing(ConfigModel):
     publish_enabled: bool = False
 
 
+class RuntimeConfig(ConfigModel):
+    worker_interval: float = Field(default=2, ge=0.1, le=60)
+    batch_size: int = Field(default=20, ge=1, le=100)
+    shutdown_timeout: float = Field(default=30, gt=0, le=300)
+    status_interval: float = Field(default=10, ge=1, le=60)
+
+
 class EvidenceConfig(ConfigModel):
     cache_ttl: int = Field(default=3600, ge=60)
     max_video_seconds: int = Field(default=1800, ge=30, le=14400)
@@ -150,6 +157,7 @@ class Settings(ConfigModel):
     publishing: Publishing = Field(default_factory=Publishing)
     evidence: EvidenceConfig = Field(default_factory=EvidenceConfig)
     transcription: TranscriptionConfig = Field(default_factory=TranscriptionConfig)
+    runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     unsafe_words: list[str] = Field(default_factory=list)
 
     @property

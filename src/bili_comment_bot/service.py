@@ -149,7 +149,20 @@ class BusinessService:
             if not await self.store.ready_work(key):
                 return []
             try:
-                return await self._discover(aid, key)
+                result = await self._discover(aid, key)
+                if not await self.store.workflow(key):
+                    await self.store.reevaluate_candidate(aid, self.settings.discovery.interval)
+                else:
+                    steps = discovery_steps(
+                        DiscoveryWorkflow.model_validate_json(await self.store.workflow(key)).score
+                    )
+                    done = (
+                        bool(result)
+                        and len(result) == len(steps)
+                        and all(status in SUCCESS for status in result)
+                    )
+                    await self.store.discovery_state(key, "done" if done else "paused")
+                return result
             except (AIError, PlatformError):
                 await self.store.defer_work(key)
                 return []

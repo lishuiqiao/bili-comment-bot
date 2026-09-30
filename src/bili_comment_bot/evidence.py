@@ -95,6 +95,7 @@ class EvidenceService:
         if settings.evidence.transcription_enabled and transcriber is None:
             raise TranscriptionUnavailable()
         self.tasks: dict[str, asyncio.Task] = {}
+        self.metrics = {"cache_hits": 0, "cache_misses": 0}
 
     async def get_video(self, aid: int) -> VideoEvidence:
         if self.settings.evidence.transcription_enabled and self.transcriber is None:
@@ -167,10 +168,12 @@ class EvidenceService:
                         )
                     )
                 ):
+                    self.metrics["cache_hits"] += 1
                     return result
             except ValueError:
                 pass  # A malformed cache cannot approve content; reacquire it.
         duration = sum(part.duration for part in details.parts)
+        self.metrics["cache_misses"] += 1
         common = dict(
             aid=details.aid,
             bvid=details.bvid,

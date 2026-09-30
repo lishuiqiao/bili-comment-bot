@@ -21,6 +21,7 @@ from ...storage import Store
 from .auth import AuthManager
 from .auth_state import Credentials
 from .errors import (
+    CaptchaRequired,
     IdentityMismatch,
     LoginExpired,
     PlatformError,
@@ -260,6 +261,8 @@ class BilibiliClient:
                 if not isinstance(result, dict):
                     raise ProtocolFault()
                 if result.get("need_captcha"):
+                    if self.transport.auth_fault:
+                        self.transport.auth_fault.notify(CaptchaRequired())
                     raise ProtocolFault()
                 field = "msg_key" if origin == "message" else "rpid"
                 remote_id = result.get(field)
