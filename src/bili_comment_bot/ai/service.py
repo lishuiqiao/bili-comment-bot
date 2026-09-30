@@ -56,7 +56,13 @@ class AIService:
         output = result.text.strip()
         if purpose == "summary":
             scope = ",".join(f"P{number}" for number in range(1, len(evidence.scope_cids) + 1))
-            output += f"\n（依据全视频 {scope} 字幕；未分析画面。）"
+            kinds = {part.source_type for part in evidence.parts} or {"subtitle"}
+            label = {
+                frozenset({"subtitle"}): "字幕",
+                frozenset({"transcription"}): "音频转写",
+                frozenset({"subtitle", "transcription"}): "字幕与音频转写",
+            }[frozenset(kinds)]
+            output += f"\n（依据全视频 {scope} {label}；未分析画面。）"
         return output
 
     async def rate(self, evidence: VideoEvidence) -> tuple[VideoScore, dict]:

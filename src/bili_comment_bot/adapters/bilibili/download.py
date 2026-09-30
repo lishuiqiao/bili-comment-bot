@@ -12,6 +12,21 @@ from .collection import mapping
 from .errors import HTTPFault, NetworkFault, ProtocolFault
 
 SUBTITLE_HOSTS = {"aisubtitle.hdslb.com"}
+AUDIO_HOSTS = {
+    "upos-sz-mirrorcos.bilivideo.com",
+    "upos-sz-mirrorcosb.bilivideo.com",
+    "upos-sz-mirrorhwb.bilivideo.com",
+    "upos-sz-mirror08c.bilivideo.com",
+    "upos-sz-mirror14b.bilivideo.com",
+    "upos-sz-mirrorzos.bilivideo.com",
+    "upos-sz-estgcos.bilivideo.com",
+    "upos-sz-estghw.bilivideo.com",
+    "upos-sz-estgoss.bilivideo.com",
+    "cn-hbyc-ct-01-01.bilivideo.com",
+    "cn-hbyc-ct-01-02.bilivideo.com",
+    "cn-hbyc-ct-01-05.bilivideo.com",
+    "cn-jxjj-ct-01-01.bilivideo.com",
+}
 
 
 def checked_url(value: str, hosts=SUBTITLE_HOSTS) -> str:
@@ -68,7 +83,9 @@ class Downloader:
                     url,
                     headers={
                         "Cookie": "",
+                        "Authorization": "",
                         "Accept-Encoding": "identity",
+                        "User-Agent": "Mozilla/5.0 bili-comment-bot/0.1",
                         "Referer": "https://www.bilibili.com/",
                     },
                 ) as response:

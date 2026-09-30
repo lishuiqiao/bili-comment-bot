@@ -57,6 +57,7 @@ def evidence_data(evidence: VideoEvidence | None) -> dict | None:
         "transcript": evidence.transcript,
         "sources": evidence.sources,
         "scope_cids": evidence.scope_cids,
+        "parts": [part.model_dump() for part in evidence.parts],
         "coverage": evidence.coverage,
         "limitations": evidence.limitations,
         "comments": evidence.comments,

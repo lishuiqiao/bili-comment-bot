@@ -53,5 +53,16 @@ transcription_enabled = false
 transcription_model = "whisper-1"
 subtitle_languages = ["zh-CN", "ai-zh", "zh-Hans", "en"] # 依次优先；处理整个视频全部分 P
 comment_sample_size = 20 # 热门评论样本；不代表全部观众
-max_download_mb = 64 # 单视频累计字幕下载预算
+max_download_mb = 64 # 整部视频累计字幕+音频下载预算
+max_text_chars = 60000
+
+[transcription]
+base_url = "https://api.openai.com/v1" # 独立转写服务，密钥仅用 BILI_BOT_TRANSCRIPTION_API_KEY
+language = "zh" # ISO-639-1 提示；空字符串由服务自动识别
+timeout = 120
+concurrency = 1
+max_upload_bytes = 24000000 # 单次 M4A 上传，超过预算不截断转写
+max_calls_per_video = 20 # 整部多 P 共用，不按分 P 重置
+max_calls_per_minute = 20
+max_response_bytes = 1000000
 max_text_chars = 60000

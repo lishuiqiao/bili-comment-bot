@@ -87,6 +87,26 @@ class Limits(ConfigModel):
     max_reply_chars: int = Field(default=800, ge=50, le=2000)
 
 
+class TranscriptionConfig(ConfigModel):
+    base_url: str = "https://api.openai.com/v1"
+    api_key: SecretStr = SecretStr("")
+    language: str = Field(default="zh", pattern=r"^(?:[a-z]{2})?$", max_length=2)
+    timeout: float = Field(default=120, gt=0, le=600)
+    concurrency: int = Field(default=1, ge=1, le=8)
+    max_upload_bytes: int = Field(default=24000000, ge=1000, le=25000000)
+    max_response_bytes: int = Field(default=1000000, ge=1000, le=4000000)
+    max_text_chars: int = Field(default=60000, ge=1000, le=200000)
+    max_calls_per_video: int = Field(default=20, ge=1, le=200)
+    max_calls_per_minute: int = Field(default=20, ge=1, le=1000)
+    allow_insecure_http: bool = False
+    backend_id: str = Field(default="openai-verbose-v1", pattern=r"^[a-zA-Z0-9_.-]{1,80}$")
+
+    @field_validator("base_url")
+    @classmethod
+    def provider_url(cls, value):
+        return AIConfig.provider_url(value)
+
+
 class Discovery(ConfigModel):
     keywords: list[str] = Field(default_factory=list, max_length=20)
     invite_uids: list[StrictInt] = Field(default_factory=list)
@@ -113,7 +133,7 @@ class EvidenceConfig(ConfigModel):
     max_download_mb: int = Field(default=64, ge=1, le=256)
     max_text_chars: int = Field(default=60000, ge=1000, le=200000)
     transcription_enabled: bool = False
-    transcription_model: str = "whisper-1"
+    transcription_model: str = Field(default="whisper-1", min_length=1, max_length=100)
     subtitle_languages: list[str] = Field(
         default_factory=lambda: ["zh-CN", "ai-zh", "zh-Hans", "en"], min_length=1, max_length=10
     )
@@ -129,6 +149,7 @@ class Settings(ConfigModel):
     discovery: Discovery = Field(default_factory=Discovery)
     publishing: Publishing = Field(default_factory=Publishing)
     evidence: EvidenceConfig = Field(default_factory=EvidenceConfig)
+    transcription: TranscriptionConfig = Field(default_factory=TranscriptionConfig)
     unsafe_words: list[str] = Field(default_factory=list)
 
     @property
@@ -157,4 +178,16 @@ def load_settings(path: Path) -> Settings:
             ai[key] = os.environ[env]
     if "BILI_BOT_DATA_DIR" in os.environ:
         raw["data_dir"] = os.environ["BILI_BOT_DATA_DIR"]
+    transcription = raw.setdefault("transcription", {})
+    for env, key in (
+        ("BILI_BOT_TRANSCRIPTION_BASE_URL", "base_url"),
+        ("BILI_BOT_TRANSCRIPTION_API_KEY", "api_key"),
+        ("BILI_BOT_TRANSCRIPTION_LANGUAGE", "language"),
+    ):
+        if env in os.environ:
+            transcription[key] = os.environ[env]
+    if "BILI_BOT_TRANSCRIPTION_MODEL" in os.environ:
+        raw.setdefault("evidence", {})["transcription_model"] = os.environ[
+            "BILI_BOT_TRANSCRIPTION_MODEL"
+        ]
     return Settings.model_validate(raw)

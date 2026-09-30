@@ -73,3 +73,13 @@
 - [播放器原始研究](https://github.com/pskdje/bilibili-API-collect/blob/main/docs/video/player.md)：player/wbi/v2 返回 aid/cid 和 subtitle.subtitles，轨道 lan/subtitle_url，示例资源主机 aisubtitle.hdslb.com。本轮只允许这个确切 HTTPS 主机；如果新增主机，须新增一手依据与目标限制测试。协议相对地址只补 HTTPS，不沿重定向扩展范围。字幕 body 的 from/to/content 时间片与 SDK 的字幕使用方式一致；全部选定分 P 的轨道取得并校验才标完整，没有替代视觉理解。
 
 搜索、消息、元数据和字幕样例仍是合成契约测试；接口变化、目标路由、分页结束条件与双账号关系方向须列入 live acceptance。错误码通过脱敏 PlatformError.code 保留，与明确无字幕状态分开；未知结构不会当成没有内容。
+
+## 音频取流核对（第 7 轮）
+
+本地 SDK 发布包已给出 signed GET `/x/player/wbi/playurl`、avid/cid 和 DASH 音轨字段。缺少 CDN/完整结构时补充联网读取[播放流原始研究](https://raw.githubusercontent.com/pskdje/bilibili-API-collect/master/docs/video/videostream_url.md)。使用 fnval=16 请求普通 DASH，不申请会员绕过。baseUrl/base_url 和备用地址有别名；默认地址同时存在却不一致会拒绝。timelength 为毫秒，dash.duration 为秒。
+
+取流前核实 aid 的分 P 成员，核对 CID 与时长，响应若提供 aid/cid 也须一致。playurl 不保证回显 ID，绑定依据为已核实分 P、签名请求与时长，不宣称每次响应回显。只选择 AAC mp4a.* 和最低 bandwidth。
+
+download.py::AUDIO_HOSTS 允许研究示例中的 13 个确切 bilivideo.com 主机，未放开域名后缀。mcdn.bilivideo.cn 非标准端口不允许，可在传输前选择已核对的 HTTPS 443 备用主机；传输失败不再自动重试。未知目标、IP、用户信息、重定向和非预期端口拒绝，Cookie/Authorization 显式为空，签名 URL 不持久化。
+
+dash.audio 明确 null/空列表才返回无音频；缺字段、未知音轨、目标/时长错误为 ProtocolFault。失效为 LoginExpired；访问限制保留 PlatformError.code 或 HTTPFault 状态，不当无音频，也不猜全部权限码含义。音频与字幕共享累计预算。测试均为合成边界，未验证真实 DASH 可由配置供应商解码。

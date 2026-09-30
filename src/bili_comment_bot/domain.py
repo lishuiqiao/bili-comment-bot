@@ -1,6 +1,7 @@
 """Platform-independent contracts. Model output can never select side effects."""
 
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -72,10 +73,23 @@ class VideoEvidence(Contract):
     limitations: list[str] = Field(default_factory=list)
     status: str = "insufficient"
     comment_sample: dict = Field(default_factory=dict)
+    parts: list["PartEvidence"] = Field(default_factory=list)
 
     @property
     def usable(self) -> bool:
         return self.complete and bool(self.transcript.strip()) and bool(self.sources)
+
+
+class PartEvidence(Contract):
+    cid: int = Field(gt=0, strict=True)
+    page: int = Field(gt=0, strict=True)
+    duration: int = Field(gt=0, strict=True)
+    source_type: Literal["subtitle", "transcription"]
+    source_id: str = Field(min_length=1, max_length=300)
+    language: str = Field(min_length=1, max_length=80)
+    model: str = Field(default="", max_length=100)
+    acquired_at: float = Field(gt=0, allow_inf_nan=False)
+    limitation: str
 
 
 class VideoScore(Contract):

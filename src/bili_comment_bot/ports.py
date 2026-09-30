@@ -13,7 +13,8 @@ from .domain import (
 
 if TYPE_CHECKING:
     from .adapters.bilibili.collection import AtPage, DmPage, SessionPage
-    from .adapters.bilibili.video import CommentSample, SubtitleTrack, VideoDetails
+    from .adapters.bilibili.video import AudioTrack, CommentSample, SubtitleTrack, VideoDetails
+    from .ai.transcription import TranscriptResult
 
 
 class PlatformPort(Protocol):
@@ -34,6 +35,10 @@ class EvidencePort(Protocol):
     async def get_video(self, aid: int) -> VideoEvidence: ...
 
 
+class TranscriptionPort(Protocol):
+    async def transcribe(self, audio: bytes, expected_duration: float) -> TranscriptResult: ...
+
+
 class CollectionPort(Protocol):
     async def at_page(self, older: tuple[int, int] | None = None) -> AtPage: ...
 
@@ -48,3 +53,5 @@ class VideoPort(Protocol):
     async def comments(self, aid: int) -> CommentSample: ...
 
     async def subtitle_tracks(self, aid: int, cid: int) -> list[SubtitleTrack]: ...
+
+    async def audio_track(self, aid: int, cid: int) -> AudioTrack | None: ...

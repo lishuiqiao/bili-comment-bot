@@ -9,3 +9,5 @@
 第 6 轮 `ai_fixtures.py` 预置结构化模型答案和完整视频证据，`test_business_flows.py` 将其接入真实平台适配器的 MockTransport；没有访问模型或 B 站。`evals/safety-v1.jsonl` 的消息是自写用例，规则回归只验证 expected_rule，不能将预置 expected_decision 视为实际模型结果。
 
 后续如加入真实脱敏响应，必须单独标记采集时间、接口、脱敏字段和真实数据性质；不得将现有合成样例改标成 live acceptance。
+
+第 7 轮 transcription_fixtures.py 的 MP4 顶层盒是人工协议样例，内容不可播放；转写答案与时间戳也是假设数据。测试证明上传/响应契约、范围/来源与故障状态，不证明媒体解码、语言质量或真实供应商兼容。

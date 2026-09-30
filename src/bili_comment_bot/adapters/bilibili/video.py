@@ -1,6 +1,7 @@
 """Video facts and bounded samples, separate from AI judgements."""
 
 import html
+import math
 import re
 import time
 
@@ -8,6 +9,7 @@ from pydantic import Field
 
 from ...domain import Contract
 from .collection import Reader, integer, mapping, nullable_sequence, sequence, text
+from .download import AUDIO_HOSTS, checked_url
 from .errors import ProtocolFault
 
 
@@ -51,7 +53,67 @@ class SubtitleTrack(Contract):
     url: str = Field(repr=False)
 
 
+class AudioTrack(Contract):
+    aid: int = Field(gt=0, strict=True)
+    cid: int = Field(gt=0, strict=True)
+    duration: float = Field(gt=0, allow_inf_nan=False, strict=True)
+    url: str = Field(repr=False)
+    codec: str
+    format: str = "m4a"
+    binding: str = "verified requested aid/cid and playback duration"
+
+
 class VideoAPI(Reader):
+    async def audio_track(self, aid: int, cid: int) -> AudioTrack | None:
+        # playurl does not always echo IDs. Verify membership before the signed request,
+        # compare playback duration, and validate any optional echoed IDs when present.
+        details = await self.details(aid)
+        part = next((part for part in details.parts if part.cid == cid), None)
+        if part is None or part.duration <= 0:
+            raise ProtocolFault()
+        data = await self.get(
+            "api",
+            "/x/player/wbi/playurl",
+            {"avid": aid, "cid": cid, "fnval": 16, "fnver": 0, "qn": 16},
+            signed=True,
+        )
+        for key, value in (("aid", aid), ("cid", cid)):
+            if key in data and integer(data[key], 1) != value:
+                raise ProtocolFault()
+        duration = integer(data.get("timelength"), 1) / 1000
+        if abs(duration - part.duration) > 2:
+            raise ProtocolFault()
+        dash = mapping(data.get("dash"))
+        if "duration" in dash:
+            raw = dash["duration"]
+            if type(raw) not in {int, float} or not math.isfinite(raw) or abs(raw - duration) > 2:
+                raise ProtocolFault()
+        audios = nullable_sequence(dash, "audio")
+        candidates = []
+        for entry in audios:
+            entry = mapping(entry)
+            codec = text(entry.get("codecs"))
+            bandwidth = integer(entry.get("bandwidth"), 1)
+            if not codec.startswith("mp4a."):
+                continue  # Unsupported codecs do not get uploaded under a false format.
+            if "base_url" in entry and "baseUrl" in entry and entry["base_url"] != entry["baseUrl"]:
+                raise ProtocolFault()
+            primary = text(entry.get("base_url", entry.get("baseUrl")))
+            backups = sequence(entry.get("backup_url", entry.get("backupUrl", [])), nullable=True)
+            for raw_url in [primary, *backups]:
+                try:
+                    url = checked_url(text(raw_url), AUDIO_HOSTS)
+                except ProtocolFault:
+                    continue
+                candidates.append((bandwidth, codec, url))
+                break  # Choose one address; failed transfers are never retried implicitly.
+        if not candidates:
+            if audios:
+                raise ProtocolFault()  # Present but unsupported/untrusted is not "no audio".
+            return None
+        _, codec, url = min(candidates, key=lambda item: item[0])
+        return AudioTrack(aid=aid, cid=cid, duration=duration, codec=codec, url=url)
+
     async def details(self, aid: int) -> VideoDetails:
         data = await self.get("api", "/x/web-interface/view", {"aid": aid})
         if integer(data.get("aid"), 1) != aid:

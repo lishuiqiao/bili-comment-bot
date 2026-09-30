@@ -224,18 +224,16 @@ async def test_partial_empty_bad_budget_content_is_insufficient(tmp_path, condit
             await downloader.close()
 
 
-async def test_enabled_transcription_is_explicitly_unavailable_in_this_milestone(tmp_path):
+async def test_enabled_transcription_requires_a_configured_provider(tmp_path):
     settings = Settings.model_validate({"evidence": {"transcription_enabled": True}})
     async with read_client(tmp_path, VideoServer(no_subtitle=1), settings) as (client, store, _):
         downloader = Downloader(
             1, 1000, httpx.MockTransport(lambda r: pytest.fail("should not download"))
         )
-        service = EvidenceService(settings, VideoAPI(client), downloader, store)
         try:
             with pytest.raises(TranscriptionUnavailable):
-                await service.get_video(1)
+                EvidenceService(settings, VideoAPI(client), downloader, store)
         finally:
-            await service.close()
             await downloader.close()
 
 

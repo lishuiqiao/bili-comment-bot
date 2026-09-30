@@ -5,21 +5,53 @@ import hashlib
 import json
 import math
 import time
+from urllib.parse import quote
 
 from .adapters.bilibili.collection import mapping, sequence, text
-from .adapters.bilibili.download import Downloader
+from .adapters.bilibili.download import AUDIO_HOSTS, Downloader
 from .adapters.bilibili.errors import ProtocolFault
 from .adapters.bilibili.video import VideoDetails
+from .ai.client import AIError
+from .ai.transcription import TranscriptResult
 from .config import Settings
-from .domain import VideoEvidence
-from .ports import VideoPort
+from .domain import PartEvidence, VideoEvidence
+from .ports import TranscriptionPort, VideoPort
 from .storage import Store
 
-EVIDENCE_VERSION = "subtitle-v1"
+EVIDENCE_VERSION = "spoken-v2"
 
 
-class TranscriptionUnavailable(RuntimeError):
-    pass
+class TranscriptionUnavailable(AIError):
+    def __init__(self):
+        super().__init__("transcription_configuration_missing")
+
+
+def source_id(aid: int, cid: int, kind: str, language: str, model: str = "") -> str:
+    model_part = ":model=" + quote(model, safe="") if kind == "transcription" else ""
+    return f"bilibili-{kind}:aid={aid}:cid={cid}{model_part}:language=" + quote(language, safe="-_")
+
+
+def valid_cached_parts(result: VideoEvidence, details: VideoDetails, settings: Settings) -> bool:
+    if len(result.parts) != len(details.parts):
+        return False
+    for saved, actual in zip(result.parts, details.parts, strict=True):
+        if (saved.cid, saved.page, saved.duration) != (actual.cid, actual.page, actual.duration):
+            return False
+        if saved.source_type == "subtitle":
+            if saved.language not in settings.evidence.subtitle_languages or saved.model:
+                return False
+        elif (
+            not settings.evidence.transcription_enabled
+            or saved.model != settings.evidence.transcription_model
+        ):
+            return False
+        if saved.source_id != source_id(
+            details.aid, actual.cid, saved.source_type, saved.language, saved.model
+        ):
+            return False
+    return result.sources == [part.source_id for part in result.parts] and result.languages == [
+        part.language for part in result.parts
+    ]
 
 
 def subtitle_text(body: dict, duration: int) -> str:
@@ -50,11 +82,23 @@ def subtitle_text(body: dict, duration: int) -> str:
 
 
 class EvidenceService:
-    def __init__(self, settings: Settings, api: VideoPort, downloader: Downloader, store: Store):
+    def __init__(
+        self,
+        settings: Settings,
+        api: VideoPort,
+        downloader: Downloader,
+        store: Store,
+        transcriber: TranscriptionPort | None = None,
+    ):
         self.settings, self.api, self.downloader, self.store = settings, api, downloader, store
+        self.transcriber = transcriber
+        if settings.evidence.transcription_enabled and transcriber is None:
+            raise TranscriptionUnavailable()
         self.tasks: dict[str, asyncio.Task] = {}
 
     async def get_video(self, aid: int) -> VideoEvidence:
+        if self.settings.evidence.transcription_enabled and self.transcriber is None:
+            raise TranscriptionUnavailable()
         details = await self.api.details(aid)
         config = self.settings.evidence
         cids = [part.cid for part in details.parts]
@@ -67,6 +111,10 @@ class EvidenceService:
             "duration_budget": config.max_video_seconds,
             "transcription_enabled": config.transcription_enabled,
             "transcription_model": config.transcription_model,
+            "transcription_strategy": self.settings.transcription.model_dump(exclude={"api_key"}),
+            "download_budget": config.max_download_mb,
+            "downloader_byte_limit": self.downloader.max_bytes,
+            "part_budget": self.settings.platform.max_pages,
         }
         key = "content:" + hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
         if key not in self.tasks:
@@ -115,16 +163,7 @@ class EvidenceService:
                         or (
                             result.status == "complete"
                             and result.usable
-                            and len(result.languages) == len(cids)
-                            and all(
-                                language in config.subtitle_languages
-                                for language in result.languages
-                            )
-                            and result.sources
-                            == [
-                                f"bilibili-subtitle:aid={details.aid}:cid={cid}:language={language}"
-                                for cid, language in zip(cids, result.languages, strict=True)
-                            ]
+                            and valid_cached_parts(result, details, self.settings)
                         )
                     )
                 ):
@@ -144,6 +183,7 @@ class EvidenceService:
         )
         if (
             duration <= 0
+            or any(part.duration <= 0 for part in details.parts)
             or duration > config.max_video_seconds
             or len(cids) > self.settings.platform.max_pages
         ):
@@ -152,46 +192,102 @@ class EvidenceService:
                 status="budget_exceeded",
                 limitations=["whole-video duration/part budget exceeded"],
             )
-        transcripts, sources, languages, limitations = [], [], [], []
+        transcripts, sources, languages, limitations, part_evidence = [], [], [], [], []
         status = "complete"
         remaining_bytes = config.max_download_mb * 1024 * 1024
+        transcription_calls = 0
         for part in details.parts:
             tracks = await self.api.subtitle_tracks(details.aid, part.cid)
             rank = {language: index for index, language in enumerate(config.subtitle_languages)}
             candidates = [track for track in tracks if track.language in rank]
             if not candidates:
-                if config.transcription_enabled:
-                    raise TranscriptionUnavailable("无字幕转写将在 AI 阶段接入，当前能力尚未实现")
-                status = "no_subtitle"
-                limitations.append(f"cid={part.cid}: no preferred subtitle track")
-                continue
-            track = min(candidates, key=lambda item: rank[item.language])
-            try:
-                raw = await self.downloader.fetch(track.url, max_bytes=remaining_bytes)
-                remaining_bytes -= len(raw)
-            except ProtocolFault:
-                status = "invalid_or_oversized_subtitle"
-                limitations.append(
-                    f"cid={part.cid}: invalid URL or byte budget; acquisition stopped"
+                if not config.transcription_enabled or tracks:
+                    status = "no_subtitle"
+                    limitations.append(f"cid={part.cid}: no preferred subtitle track")
+                    continue
+                if transcription_calls >= self.settings.transcription.max_calls_per_video:
+                    status = "transcription_budget_exceeded"
+                    limitations.append("whole-video transcription call budget exceeded")
+                    break
+                track = await self.api.audio_track(details.aid, part.cid)
+                if track is None:
+                    status = "no_audio"
+                    limitations.append(f"cid={part.cid}: no accessible audio")
+                    continue
+                if track.aid != details.aid or track.cid != part.cid:
+                    raise ProtocolFault()
+                try:
+                    raw = await self.downloader.fetch(
+                        track.url,
+                        hosts=AUDIO_HOSTS,
+                        max_bytes=min(
+                            remaining_bytes, self.settings.transcription.max_upload_bytes
+                        ),
+                    )
+                    remaining_bytes -= len(raw)
+                except ProtocolFault:
+                    status = "audio_download_budget_exceeded"
+                    limitations.append(f"cid={part.cid}: invalid target or audio/download budget")
+                    break
+                transcription_calls += 1
+                result = await self.transcriber.transcribe(raw, float(part.duration))
+                # Validate replaceable provider outputs as rigorously as the HTTP adapter.
+                try:
+                    result = TranscriptResult.model_validate(result)
+                except (ValueError, TypeError):
+                    raise AIError("invalid_transcription_result") from None
+                if abs(result.duration - part.duration) > 2:
+                    raise AIError("transcription_duration_mismatch")
+                transcript = "\n".join(
+                    f"[{segment.start:g}-{segment.end:g}] {segment.text.strip()}"
+                    for segment in result.segments
                 )
-                break
-            try:
-                body = mapping(json.loads(raw))
-                transcript = subtitle_text(body, part.duration)
-            except (ProtocolFault, ValueError, UnicodeError):
-                status = "invalid_or_oversized_subtitle"
-                limitations.append(f"cid={part.cid}: invalid structure/time")
-                continue
-            section = f"P{part.page} cid={part.cid} language={track.language}\n{transcript}"
+                language, kind, model = result.language, "transcription", config.transcription_model
+                limitation = (
+                    "machine speech transcription may misrecognise; visual content unanalysed"
+                )
+            else:
+                track = min(candidates, key=lambda item: rank[item.language])
+                try:
+                    raw = await self.downloader.fetch(track.url, max_bytes=remaining_bytes)
+                    remaining_bytes -= len(raw)
+                except ProtocolFault:
+                    status = "invalid_or_oversized_subtitle"
+                    limitations.append(
+                        f"cid={part.cid}: invalid URL or byte budget; acquisition stopped"
+                    )
+                    break
+                try:
+                    body = mapping(json.loads(raw))
+                    transcript = subtitle_text(body, part.duration)
+                except (ProtocolFault, ValueError, UnicodeError):
+                    status = "invalid_or_oversized_subtitle"
+                    limitations.append(f"cid={part.cid}: invalid structure/time")
+                    continue
+                language, kind, model = track.language, "subtitle", ""
+                limitation = "spoken subtitle content; visual content unanalysed"
+            section = f"P{part.page} cid={part.cid} source={kind} language={language}\n{transcript}"
             if len("\n\n".join([*transcripts, section])) > config.max_text_chars:
                 status = "text_budget_exceeded"
                 limitations.append(f"cid={part.cid}: whole-scope text budget exceeded")
                 break
             transcripts.append(section)
-            sources.append(
-                f"bilibili-subtitle:aid={details.aid}:cid={part.cid}:language={track.language}"
+            provenance = PartEvidence(
+                cid=part.cid,
+                page=part.page,
+                duration=part.duration,
+                source_type=kind,
+                source_id=source_id(details.aid, part.cid, kind, language, model),
+                language=language,
+                model=model,
+                acquired_at=time.time(),
+                limitation=limitation,
             )
-            languages.append(track.language)
+            part_evidence.append(provenance)
+            sources.append(provenance.source_id)
+            languages.append(language)
+            if kind == "transcription":
+                limitations.append(f"cid={part.cid}: {limitation}")
         result = VideoEvidence(
             **common,
             transcript="\n\n".join(transcripts),
@@ -199,6 +295,8 @@ class EvidenceService:
             languages=languages,
             status=status,
             limitations=limitations,
+            parts=part_evidence,
+            coverage="whole-scope spoken subtitles/transcription; visual content is not analysed",
             complete=status == "complete" and len(sources) == len(cids),
         )
         # Cache content only; dynamic statistics/comments are refreshed separately.
