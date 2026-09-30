@@ -29,6 +29,10 @@ class ProtocolFault(PlatformError):
     pass
 
 
+class QRLoginProtocolFault(ProtocolFault):
+    """Malformed QR fields or an untrusted display URL; never retains the payload."""
+
+
 class NetworkFault(PlatformError):
     pass
 

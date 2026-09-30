@@ -18,8 +18,44 @@ from pydantic import BaseModel, Field, SecretStr
 
 from ...config import Settings
 from .auth_state import CredentialFile, Credentials, RefreshPhase
-from .errors import IdentityMismatch, LoginExpired, ProtocolFault, ReauthenticationRequired
+from .errors import (
+    IdentityMismatch,
+    LoginExpired,
+    ProtocolFault,
+    QRLoginProtocolFault,
+    ReauthenticationRequired,
+)
 from .transport import BiliTransport
+
+# QR display only: these hosts do not extend transport.ORIGINS or polling URL trust.
+QR_DISPLAY_HOSTS = frozenset({"passport.bilibili.com", "account.bilibili.com"})
+
+
+def validate_qr_display_url(url: str) -> None:
+    """Validate before parsing: urlsplit otherwise silently removes some controls."""
+    if (
+        not url
+        or any(char.isspace() or ord(char) < 32 or 127 <= ord(char) < 160 for char in url)
+        or "\\" in url
+        or "#" in url
+    ):
+        raise QRLoginProtocolFault()
+    try:
+        parts = urlsplit(url)
+        trusted = (
+            parts.scheme == "https"
+            and parts.hostname in QR_DISPLAY_HOSTS
+            and parts.username is None
+            and parts.password is None
+            and parts.port in {None, 443}
+            and parts.netloc.lower() in {parts.hostname, f"{parts.hostname}:443"}
+        )
+    except ValueError:
+        # Raise after the handler so the parser error cannot retain raw URL text as context.
+        trusted = False
+    if not trusted:
+        raise QRLoginProtocolFault()
+
 
 # Public protocol key, also published by bilibili-api-python 17.4.2.
 REFRESH_PUBLIC_KEY = b"""-----BEGIN PUBLIC KEY-----
@@ -182,11 +218,9 @@ class AuthManager:
                 )
             ).data()
             url, key = data.get("url"), data.get("qrcode_key")
-            if not isinstance(url, str) or not isinstance(key, str) or not key:
-                raise ProtocolFault()
-            parts = urlsplit(url)
-            if parts.scheme != "https" or parts.hostname != "passport.bilibili.com":
-                raise ProtocolFault()
+            if not isinstance(url, str) or not isinstance(key, str) or not key.strip():
+                raise QRLoginProtocolFault()
+            validate_qr_display_url(url)
             return QRChallenge(key=key, url=url)
 
     async def poll_qr(self, challenge: QRChallenge) -> QRStatus:

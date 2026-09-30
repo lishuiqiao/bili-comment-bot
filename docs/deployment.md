@@ -62,6 +62,18 @@ docker compose run --rm bot verify-action --namespace live --action-id '实际�
 
 点赞核实和取消规则见 [运维手册](operations.md)。备份前停止服务，备份完整卷（认证、数据库/WAL及锁文件），恢复同一账号与正确所有权。`docker compose down -v` 会删除持久状态。备份含私密消息，需要限制读取。
 
+## 二维码生成失败
+
+`QRLoginProtocolFault` 表示二维码字段无效，或展示地址未通过可信 HTTPS 校验。先更新 bili-comment-bot 并重建镜像，再按上面的首次扫码流程操作；这类错误不表示需要反复扫码。展示地址兼容 `passport.bilibili.com` 和 `account.bilibili.com`，生成与轮询 API 仍使用原地址，详见 [接口核对记录](bilibili-interface-notes.md)。
+
+```sh
+docker compose stop bot
+git pull --ff-only
+docker compose build bot
+```
+
+仍失败时只提供项目版本与错误类型。不要公开二维码图片、完整二维码 URL、二维码 key、Cookie、实际配置或 API key。本轮自动验证只使用合成数据，真实登录由操作者手动验收。
+
 ## 验证
 
 CI 构建镜像、验证 Compose，以 `--network none` 实际运行容器，检查非 root、持久卷权限/跨容器写入、开发工具排除、无凭据启动失败、打包评测与双命名空间健康。CI 不发布镜像、不部署、不调用真实模型或写 B 站。验证范围与真实验收清单见 [验证矩阵](acceptance-matrix.md)。

@@ -90,6 +90,8 @@ async def test_bounded_response_and_fixed_origins():
     try:
         for origin, path in [
             ("attacker", "/x"),
+            ("account", "/x"),
+            ("https://account.bilibili.com", "/x"),
             ("api", "//attacker.invalid"),
             ("api", "/x?secret"),
         ]:

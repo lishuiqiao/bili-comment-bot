@@ -1,6 +1,6 @@
 # B 站接口核对记录
 
-核对日期：2026-09-30。以下是接口实现依据，尚未用真实账号验证线上兼容性。所有外部文字、代码和视频资料均按不可信输入处理。
+核对日期：2026-09-30。以下是接口实现依据，完整真实账号登录与续期的线上兼容性仍待验收。所有外部文字、代码和视频资料均按不可信输入处理。
 
 ## 来源与限制
 
@@ -26,6 +26,10 @@
 | 确认续期 | POST passport.bilibili.com/x/passport-login/web/confirm/refresh | **新 Cookie 的 csrf + 旧 refresh_token**，不可传新 refresh_token |
 
 扫码成功同时持久化 Cookie 与 refresh_token。续期产生新凭据后先原子保存，再确认旧凭据失效；中断时应保留待确认状态以便恢复。账号完全失效和验证码要求重新扫码，不能循环伪装成功。
+
+二维码**展示地址**与生成、轮询的 **API 地址**分别校验。[二维码登录原始研究](https://github.com/pskdje/bilibili-API-collect/blob/master/docs/login/login_action/QR.md)的样例使用 `passport.bilibili.com`；兼容排查的脱敏诊断另确认了 HTTPS `account.bilibili.com` 返回地址。展示地址只允许这两个精确主机，省略端口或显式 `443`；拒绝用户信息、伪装域名、畸形地址、空白/控制字符、反斜杠及 fragment。路径与查询保持原样，不记录完整地址或二维码 key，也不请求展示地址。
+
+生成、轮询仍请求 `passport.bilibili.com`，出站 API origins 不因新增展示主机而扩大。轮询成功 URL 的凭据解析规则也保持独立。这次兼容修复使用合成响应进行离线回归，脱敏域名诊断不能替代完整扫码、持久化及自动续期的真实验收。
 
 ## 评论、私信和视频
 

@@ -204,6 +204,7 @@ def main():
             CaptchaRequired,
             IdentityMismatch,
             LoginExpired,
+            QRLoginProtocolFault,
             ReauthenticationRequired,
         )
 
@@ -255,6 +256,13 @@ def main():
             parser.exit(2, "B 站要求验证，已暂停；请在手机 App 完成验证后重新扫码。\n")
         except LoginExpired:
             parser.exit(2, "登录已失效或尚未登录；请运行 login 扫码。\n")
+        except QRLoginProtocolFault:
+            parser.exit(
+                2,
+                "二维码生成响应格式无效或地址未通过可信 HTTPS 校验"
+                "（QRLoginProtocolFault）。请更新 bili-comment-bot 并重新构建镜像后重试；"
+                "仍失败时仅提供版本与错误类型，不要分享二维码、完整 URL、密钥或 Cookie。\n",
+            )
         except (OSError, ValueError, RuntimeError, TimeoutError) as error:
             parser.exit(2, f"操作未完成（{type(error).__name__}）；检查配置、状态和连接后重试。\n")
         except Exception as error:

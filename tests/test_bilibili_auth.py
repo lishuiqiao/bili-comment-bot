@@ -21,6 +21,7 @@ from bili_comment_bot.adapters.bilibili.errors import (
     IdentityMismatch,
     LoginExpired,
     NetworkFault,
+    QRLoginProtocolFault,
     ReauthenticationRequired,
 )
 from bili_comment_bot.config import Settings
@@ -68,6 +69,140 @@ def cookie_headers(csrf="new-csrf"):
 
 
 @pytest.mark.parametrize(
+    "url",
+    [
+        "https://passport.bilibili.com/qrcode/x?key=synthetic-qr-token",
+        "https://account.bilibili.com/h5-app/passport/login/scan?key=synthetic-qr-token",
+        "https://passport.bilibili.com:443/qrcode/x?key=synthetic-qr-token",
+        "https://account.bilibili.com:443/qrcode/x?key=synthetic-qr-token",
+        "HTTPS://PASSPORT.BILIBILI.COM/qrcode/x?key=synthetic-qr-token",
+        "HTTPS://ACCOUNT.BILIBILI.COM:443/qrcode/x?key=synthetic-qr-token%23opaque",
+    ],
+)
+async def test_generate_qr_accepts_exact_trusted_origins_without_requesting_display_url(
+    url, tmp_path
+):
+    calls = []
+
+    def handler(request):
+        calls.append((request.method, request.url.host, request.url.path))
+        return ok({"url": url, "qrcode_key": "synthetic-qr-key"})
+
+    transport = transport_for(handler)
+    file = CredentialFile(tmp_path / "auth.json")
+    manager = AuthManager(Settings(), transport, file)
+    try:
+        challenge = await manager.generate_qr()
+        assert challenge.url.get_secret_value() == url
+        assert challenge.key.get_secret_value() == "synthetic-qr-key"
+        assert "synthetic-qr" not in repr(challenge)
+        assert "synthetic-qr" not in challenge.model_dump_json()
+        assert calls == [("GET", "passport.bilibili.com", "/x/passport-login/web/qrcode/generate")]
+        assert manager.state is None
+        assert not file.path.exists()
+    finally:
+        await transport.close()
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://account.bilibili.com/qrcode/x",
+        "//account.bilibili.com/qrcode/x",
+        "/qrcode/x",
+        "https://account.bilibili.com.evil.invalid/qrcode/x",
+        "https://evil-account.bilibili.com/qrcode/x",
+        "https://sub.account.bilibili.com/qrcode/x",
+        "https://account.bilibili.com@evil.invalid/qrcode/x",
+        "https://evil.invalid@account.bilibili.com/qrcode/x",
+        "https://:secret@account.bilibili.com/qrcode/x",
+        "https://@account.bilibili.com/qrcode/x",
+        "https://account.bilibili.com:80/qrcode/x",
+        "https://account.bilibili.com:444/qrcode/x",
+        "https://account.bilibili.com:/qrcode/x",
+        "https://account.bilibili.com:invalid/qrcode/x",
+        "https://account.bilibili.com:65536/qrcode/x",
+        "https://account.bilibili.com:0443/qrcode/x",
+        "https://[account.bilibili.com/qrcode/x",
+        "https://[::1]/qrcode/x",
+        "https://account.bilibili.com./qrcode/x",
+        "https://account.bilibili.com\uff0fevil.invalid/qrcode/x",
+        "https://\u0430ccount.bilibili.com/qrcode/x",
+        " https://account.bilibili.com/qrcode/x",
+        "https://account.bilibili.com/qrcode/x ",
+        "\x00https://account.bilibili.com/qrcode/x",
+        "https://account.bilibili.com/qr\tcode/x",
+        "https://account.bilibili.com/qr\ncode/x",
+        "https://account.bilibili.com/qr\rcode/x",
+        "https://account.bilibili.com/qr\x7fcode/x",
+        "https://account.bilibili.com/qr\x80code/x",
+        "https://account.bilibili.com/qrcode/\u00a0x",
+        "https://account.bilibili.com\\@evil.invalid/qrcode/x",
+        "https://account.bilibili.com/qrcode/x#fragment",
+        "https://account.bilibili.com/qrcode/x#",
+    ],
+)
+async def test_generate_qr_rejects_untrusted_or_malformed_urls_without_changing_auth(
+    url, tmp_path, caplog
+):
+    file = CredentialFile(tmp_path / "auth.json")
+    file.save(credentials())
+    before = file.path.read_bytes()
+    calls = []
+
+    def handler(request):
+        calls.append(request.url.path)
+        return ok({"url": f"{url}?key=synthetic-url-secret", "qrcode_key": "synthetic-qr-key"})
+
+    transport = transport_for(handler)
+    manager = AuthManager(Settings(), transport, file)
+    original_state = manager.state
+    try:
+        with pytest.raises(QRLoginProtocolFault) as caught:
+            await manager.generate_qr()
+        assert str(caught.value) == "QRLoginProtocolFault (code=None)"
+        assert "synthetic" not in repr(caught.value)
+        assert "synthetic" not in caplog.text
+        assert caught.value.__cause__ is None
+        assert caught.value.__context__ is None
+        assert manager.state is original_state
+        assert file.path.read_bytes() == before
+        assert not (tmp_path / "login.png").exists()
+        assert calls == ["/x/passport-login/web/qrcode/generate"]
+    finally:
+        await transport.close()
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {},
+        {"url": "https://account.bilibili.com/qrcode/x"},
+        {"qrcode_key": "synthetic-qr-key"},
+        {"url": None, "qrcode_key": "synthetic-qr-key"},
+        {"url": 123, "qrcode_key": "synthetic-qr-key"},
+        {"url": "", "qrcode_key": "synthetic-qr-key"},
+        {"url": "https://account.bilibili.com/x", "qrcode_key": None},
+        {"url": "https://account.bilibili.com/x", "qrcode_key": 123},
+        {"url": "https://account.bilibili.com/x", "qrcode_key": ""},
+        {"url": "https://account.bilibili.com/x", "qrcode_key": " \t"},
+    ],
+)
+async def test_generate_qr_rejects_missing_or_invalid_challenge_fields(data, tmp_path):
+    transport = transport_for(lambda request: ok(data))
+    file = CredentialFile(tmp_path / "auth.json")
+    manager = AuthManager(Settings(), transport, file)
+    try:
+        with pytest.raises(QRLoginProtocolFault) as caught:
+            await manager.generate_qr()
+        assert "synthetic" not in str(caught.value)
+        assert manager.state is None
+        assert not file.path.exists()
+    finally:
+        await transport.close()
+
+
+@pytest.mark.parametrize(
     "code,expected",
     [(86101, QRStatus.WAITING_SCAN), (86090, QRStatus.WAITING_CONFIRM), (86038, QRStatus.EXPIRED)],
 )
@@ -84,12 +219,15 @@ async def test_qr_pending_and_expired_states(code, expected, tmp_path):
 
 
 @pytest.mark.parametrize("via_url", [False, True])
-async def test_qr_success_verified_and_saved_without_leaking_secrets(via_url, tmp_path):
+@pytest.mark.parametrize("qr_host", ["passport.bilibili.com", "account.bilibili.com"])
+async def test_qr_success_verified_and_saved_without_leaking_secrets(via_url, qr_host, tmp_path):
+    calls = []
+    qr_url = f"https://{qr_host}/qrcode/x?key=synthetic-qr-token"
+
     def handler(request):
+        calls.append((request.url.host, request.url.path))
         if request.url.path.endswith("generate"):
-            return ok(
-                {"qrcode_key": "private-key", "url": "https://passport.bilibili.com/qrcode/x"}
-            )
+            return ok({"qrcode_key": "private-key", "url": qr_url})
         if request.url.path.endswith("poll"):
             data = {"code": 0, "refresh_token": "private-refresh"}
             if via_url:
@@ -105,6 +243,7 @@ async def test_qr_success_verified_and_saved_without_leaking_secrets(via_url, tm
     manager = AuthManager(Settings(), transport, file)
     try:
         challenge = await manager.generate_qr()
+        assert challenge.url.get_secret_value() == qr_url
         image = tmp_path / "login.png"
         challenge.write_image(image)
         assert image.stat().st_mode & 0o777 == 0o600
@@ -114,6 +253,11 @@ async def test_qr_success_verified_and_saved_without_leaking_secrets(via_url, tm
         assert tmp_path.stat().st_mode & 0o777 == 0o700
         assert "new-session" not in repr(manager.state)
         assert "private-refresh" not in manager.state.model_dump_json()
+        assert calls == [
+            ("passport.bilibili.com", "/x/passport-login/web/qrcode/generate"),
+            ("passport.bilibili.com", "/x/passport-login/web/qrcode/poll"),
+            ("api.bilibili.com", "/x/web-interface/nav"),
+        ]
     finally:
         await transport.close()
 
