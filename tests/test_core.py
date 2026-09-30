@@ -149,7 +149,8 @@ async def test_quota_survives_restart(tmp_path, live_settings):
     await first.close()
     second = await Store(path, clock=lambda: 10000).open()
     try:
-        assert not await second.reserve_quota("new", 10, Channel.DM, 5)
+        await second.put_actions([reply("new")])
+        assert (await second.claim_action("new")).status == ActionStatus.BLOCKED
     finally:
         await second.close()
 
@@ -158,24 +159,27 @@ async def test_two_connections_cannot_take_last_slot(tmp_path):
     path = tmp_path / "race.db"
     stores = [await Store(path, clock=lambda: 10000).open() for _ in range(2)]
     try:
+        await stores[0].put_actions([reply(f"race:{i}") for i in range(2)])
         results = await asyncio.gather(
-            *(s.reserve_quota(f"race:{i}", 10, Channel.DM, 1) for i, s in enumerate(stores))
+            *(s.claim_action(f"race:{i}", dm_limit=1) for i, s in enumerate(stores))
         )
-        assert sorted(results) == [False, True]
+        assert sorted(result.claimed for result in results) == [False, True]
     finally:
         for instance in stores:
             await instance.close()
 
 
-async def test_pending_reservation_does_not_expire_without_proof(tmp_path):
+async def test_in_flight_reservation_does_not_expire_without_proof(tmp_path):
     now = [10000]
     store = await Store(tmp_path / "reservation.db", clock=lambda: now[0]).open()
     try:
-        assert await store.reserve_quota("old", 10, Channel.DM, 1)
+        await store.put_actions([reply("old"), reply("new"), reply("later")])
+        assert (await store.claim_action("old", dm_limit=1)).claimed
         now[0] += 7200
-        assert not await store.reserve_quota("new", 10, Channel.DM, 1)
-        await store.release_quota("old")
-        assert await store.reserve_quota("new", 10, Channel.DM, 1)
+        assert (await store.claim_action("new", dm_limit=1)).status == ActionStatus.BLOCKED
+        assert not await store.cancel_pending("old")
+        await store.finish_action("old", ActionStatus.FAILED, reason="confirmed not sent")
+        assert (await store.claim_action("later", dm_limit=1)).claimed
     finally:
         await store.close()
 
@@ -285,7 +289,7 @@ async def test_timeout_freezes_and_keeps_reservation(store, live_settings):
     platform = FakePlatform({"timeout": TimeoutError()})
     dispatcher = Dispatcher(settings, store, platform)
     assert await dispatcher.execute(reply("timeout")) == ActionStatus.UNCERTAIN
-    await store.release_quota("timeout")
+    assert not await store.cancel_pending("timeout")
     assert await dispatcher.execute(reply("new")) == ActionStatus.BLOCKED
     await store.recover()
     assert await dispatcher.execute(reply("timeout")) == ActionStatus.UNCERTAIN
@@ -298,8 +302,7 @@ async def test_crash_after_remote_success_before_local_ack(tmp_path, live_settin
     item = reply()
     platform = FakePlatform()
     await first.put_actions([item])
-    await first.reserve_quota(item.id, item.uid, item.channel, 5)
-    assert await first.claim_action(item.id)
+    assert (await first.claim_action(item.id)).claimed
     await platform.publish(item)
     await first.close()  # No receipt persisted: an injected process crash.
     second = await Store(path).open()
@@ -376,7 +379,8 @@ async def test_simulation_isolated_from_live(tmp_path, publishing):
         assert await dispatcher.execute(reply()) == ActionStatus.SIMULATED
         assert not platform.calls
         assert await live.action("reply:1") is None
-        assert await live.reserve_quota("reply:1", 10, Channel.DM, 1)
+        await live.put_actions([reply()])
+        assert (await live.claim_action("reply:1", dm_limit=1)).claimed
         with pytest.raises(ValueError):
             Dispatcher(settings, live, platform)
     finally:
@@ -398,3 +402,263 @@ def test_config_secret_repr_and_invalid_values(tmp_path, monkeypatch):
         Settings.model_validate({"persona": {"name": "@wrong"}})
     with pytest.raises(ValidationError):
         Settings.model_validate({"discovery": {"invite_uids": [0]}})
+
+
+async def quota_rows(store):
+    async with store.transaction() as db:
+        return await (await db.execute("SELECT * FROM quota WHERE ns=?", (store.ns,))).fetchall()
+
+
+async def test_publish_disabled_after_dispatcher_creation(store, live_settings):
+    platform = FakePlatform()
+    dispatcher = Dispatcher(live_settings, store, platform)
+    live_settings.publishing.publish_enabled = False
+    assert await dispatcher.execute(reply()) == ActionStatus.PENDING
+    assert not platform.calls
+    assert not await quota_rows(store)
+    live_settings.publishing.publish_enabled = True
+    assert await dispatcher.execute(reply()) == ActionStatus.SUCCEEDED
+
+
+@pytest.mark.parametrize("switch", ["publish_enabled", "dry_run"])
+async def test_publish_switch_changed_while_follow_check_waits(switch, store, live_settings):
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    class WaitingFollower(FakePlatform):
+        async def sender_follows_bot(self, uid):
+            entered.set()
+            await release.wait()
+            return FollowState.YES
+
+    platform = WaitingFollower()
+    task = asyncio.create_task(Dispatcher(live_settings, store, platform).execute(reply()))
+    try:
+        async with asyncio.timeout(10):
+            await entered.wait()
+            setattr(live_settings.publishing, switch, switch == "dry_run")
+            release.set()
+            assert await task == ActionStatus.PENDING
+        assert not platform.calls
+        assert not await quota_rows(store)
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_sim_dispatcher_cannot_become_live_by_mutating_config(tmp_path):
+    settings = Settings()
+    store = await Store(tmp_path / "sim.db", namespace="sim").open()
+    platform = FakePlatform()
+    dispatcher = Dispatcher(settings, store, platform)
+    try:
+        settings.publishing.dry_run = False
+        settings.publishing.publish_enabled = True
+        assert await dispatcher.execute(reply()) == ActionStatus.PENDING
+        assert not await quota_rows(store)
+        settings.publishing.dry_run = True
+        assert await dispatcher.execute(reply()) == ActionStatus.SIMULATED
+        assert not platform.calls
+    finally:
+        await store.close()
+
+
+async def test_disable_after_atomic_claim_is_confirmed_unsent(store, live_settings, monkeypatch):
+    original = store.claim_action
+
+    async def disable_after_claim(*args, **kwargs):
+        result = await original(*args, **kwargs)
+        live_settings.publishing.publish_enabled = False
+        return result
+
+    monkeypatch.setattr(store, "claim_action", disable_after_claim)
+    platform = FakePlatform()
+    dispatcher = Dispatcher(live_settings, store, platform)
+    assert await dispatcher.execute(reply()) == ActionStatus.FAILED
+    assert not platform.calls
+    assert (await quota_rows(store))[0]["state"] == "released"
+    monkeypatch.setattr(store, "claim_action", original)
+    live_settings.publishing.publish_enabled = True
+    live_settings.limits.dm_per_hour = 1
+    assert await dispatcher.execute(reply("later")) == ActionStatus.SUCCEEDED
+
+
+async def test_cancellation_cannot_release_in_flight_or_uncertain_slot(store, live_settings):
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    class WaitingWrite(FakePlatform):
+        async def publish(self, action):
+            self.calls.append(action)
+            entered.set()
+            await release.wait()
+            raise TimeoutError()
+
+    live_settings.limits.dm_per_hour = 1
+    platform = WaitingWrite()
+    dispatcher = Dispatcher(live_settings, store, platform)
+    task = asyncio.create_task(dispatcher.execute(reply()))
+    try:
+        async with asyncio.timeout(10):
+            await entered.wait()
+            assert not await store.cancel_pending("reply:1")
+            assert await dispatcher.execute(reply("second")) == ActionStatus.BLOCKED
+            assert (await quota_rows(store))[0]["state"] == "reserved"
+            release.set()
+            assert await task == ActionStatus.UNCERTAIN
+        assert not await store.cancel_pending("reply:1")
+        assert (await quota_rows(store))[0]["state"] == "uncertain"
+        assert len(platform.calls) == 1
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def test_pending_cancel_and_claim_are_atomic_across_connections(tmp_path):
+    stores = [await Store(tmp_path / "cancel.db").open() for _ in range(2)]
+    try:
+        await stores[0].put_actions([reply()])
+        claim, cancelled = await asyncio.gather(
+            stores[0].claim_action("reply:1", dm_limit=1),
+            stores[1].cancel_pending("reply:1"),
+        )
+        assert claim.claimed != cancelled
+        row = await stores[0].action("reply:1")
+        if cancelled:
+            assert claim.status == ActionStatus.BLOCKED
+            assert row["status"] == ActionStatus.BLOCKED
+            assert not await quota_rows(stores[0])
+        else:
+            assert claim.status == ActionStatus.IN_FLIGHT
+            assert row["status"] == ActionStatus.IN_FLIGHT
+            assert len(await quota_rows(stores[0])) == 1
+        with pytest.raises(ValueError):
+            await stores[0].finish_action("reply:1", ActionStatus.BLOCKED)
+    finally:
+        for instance in stores:
+            await instance.close()
+
+
+async def test_duplicate_dispatchers_claim_once_and_return_actual_state(tmp_path, live_settings):
+    stores = [await Store(tmp_path / "duplicate.db").open() for _ in range(2)]
+    both_arrived, followers_release = asyncio.Event(), asyncio.Event()
+    write_entered, write_release = asyncio.Event(), asyncio.Event()
+
+    class BarrierPlatform(FakePlatform):
+        arrivals = 0
+
+        async def sender_follows_bot(self, uid):
+            self.arrivals += 1
+            if self.arrivals == 2:
+                both_arrived.set()
+            await followers_release.wait()
+            return FollowState.YES
+
+        async def publish(self, action):
+            self.calls.append(action)
+            write_entered.set()
+            await write_release.wait()
+            return await FakePlatform().publish(action)
+
+    platform = BarrierPlatform()
+    tasks = [
+        asyncio.create_task(Dispatcher(live_settings, s, platform).execute(reply())) for s in stores
+    ]
+    try:
+        async with asyncio.timeout(10):
+            await both_arrived.wait()
+            followers_release.set()
+            await write_entered.wait()
+            done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            assert len(done) == len(pending) == 1
+            assert next(iter(done)).result() == ActionStatus.IN_FLIGHT
+            assert len(platform.calls) == len(await quota_rows(stores[0])) == 1
+            write_release.set()
+            assert await next(iter(pending)) == ActionStatus.SUCCEEDED
+        assert not await stores[1].cancel_pending("reply:1")
+        assert await Dispatcher(live_settings, stores[1], platform).execute(reply()) == (
+            ActionStatus.SUCCEEDED
+        )
+    finally:
+        followers_release.set()
+        write_release.set()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        for instance in stores:
+            await instance.close()
+
+
+async def test_late_follow_success_cannot_reserve_blocked_action(tmp_path, live_settings):
+    stores = [await Store(tmp_path / "blocked.db").open() for _ in range(2)]
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    class LateSuccess(FakePlatform):
+        async def sender_follows_bot(self, uid):
+            entered.set()
+            await release.wait()
+            return FollowState.YES
+
+    good = LateSuccess()
+    live_settings.limits.dm_per_hour = 1
+    task = asyncio.create_task(Dispatcher(live_settings, stores[0], good).execute(reply()))
+    try:
+        async with asyncio.timeout(10):
+            await entered.wait()
+            bad = Dispatcher(live_settings, stores[1], FakePlatform(follows=FollowState.NO))
+            assert await bad.execute(reply()) == ActionStatus.BLOCKED
+            release.set()
+            assert await task == ActionStatus.BLOCKED
+        assert not good.calls
+        assert not await quota_rows(stores[0])
+        assert await Dispatcher(live_settings, stores[0], good).execute(reply("new")) == (
+            ActionStatus.SUCCEEDED
+        )
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+        for instance in stores:
+            await instance.close()
+
+
+async def test_late_block_cannot_overwrite_claim_or_success(store):
+    await store.put_actions([reply()])
+    assert (await store.claim_action("reply:1")).claimed
+    assert await store.block_pending("reply:1", "late follower result") == ActionStatus.IN_FLIGHT
+    assert (await quota_rows(store))[0]["state"] == "reserved"
+    await store.finish_action("reply:1", ActionStatus.SUCCEEDED, remote_id="confirmed")
+    assert await store.block_pending("reply:1", "late filter result") == ActionStatus.SUCCEEDED
+    assert not await store.cancel_pending("reply:1")
+
+
+@pytest.mark.parametrize("uncertain", [False, True])
+async def test_dependency_waits_without_quota_then_claims_after_proof(
+    uncertain, store, live_settings
+):
+    parent = discovery_actions()[0]
+    item = reply(dependency=parent.id)
+    platform = FakePlatform({parent.id: TimeoutError()} if uncertain else {})
+    dispatcher = Dispatcher(live_settings, store, platform)
+    assert await dispatcher.execute(item) == ActionStatus.PENDING
+    assert not await quota_rows(store)
+    status = await dispatcher.execute(parent)
+    if uncertain:
+        assert status == ActionStatus.UNCERTAIN
+        assert await dispatcher.execute(item) == ActionStatus.PENDING
+        assert not await quota_rows(store)
+        await store.resolve_uncertain(parent.id, "verified-like", "remote record confirmed")
+    assert await dispatcher.execute(item) == ActionStatus.SUCCEEDED
+    assert len(await quota_rows(store)) == 1
+    assert [action.id for action in platform.calls] == [parent.id, item.id]
+
+
+async def test_pending_cancellation_preserves_identity_and_never_claims(store):
+    await store.put_actions([reply(uid=22, channel=Channel.COMMENT)])
+    assert await store.cancel_pending("reply:1")
+    result = await store.claim_action("reply:1", dm_limit=1, comment_limit=1)
+    assert not result.claimed
+    assert result.status == ActionStatus.BLOCKED
+    assert not await quota_rows(store)
+
+
+async def test_quota_uses_persisted_recipient_and_channel(store):
+    await store.put_actions([reply(uid=22, channel=Channel.COMMENT)])
+    assert (await store.claim_action("reply:1", dm_limit=0, comment_limit=1)).claimed
+    row = (await quota_rows(store))[0]
+    assert (row["uid"], row["channel"]) == (22, Channel.COMMENT)

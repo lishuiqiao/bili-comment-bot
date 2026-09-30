@@ -70,6 +70,8 @@ class Dispatcher:
         action = PublishAction.model_validate_json(row["payload"])
         if row["status"] != ActionStatus.PENDING:
             return ActionStatus(row["status"])
+        if self.settings.namespace != self.store.ns:
+            return ActionStatus(row["status"])
         reason = gate(action, self.settings)
         if not reason and action.kind == ActionKind.REPLY and action.channel == Channel.DM:
             try:
@@ -78,28 +80,25 @@ class Dispatcher:
                 follows = FollowState.UNKNOWN
             if follows != FollowState.YES:
                 reason = "sender does not verifiably follow bot"
+        # Settings can change while waiting for a read. Retain the pending live action.
+        if self.settings.namespace != self.store.ns:
+            return ActionStatus((await self.store.action(action.id))["status"])
         if reason:
-            if await self.store.claim_action(action.id):
-                await self.store.finish_action(action.id, ActionStatus.BLOCKED, reason=reason)
-            return ActionStatus.BLOCKED
-        if action.kind == ActionKind.REPLY:
-            limit = (
-                self.settings.limits.dm_per_hour
-                if action.channel == Channel.DM
-                else self.settings.limits.comment_per_hour
+            return await self.store.block_pending(action.id, reason)
+        claim = await self.store.claim_action(
+            action.id,
+            dm_limit=self.settings.limits.dm_per_hour,
+            comment_limit=self.settings.limits.comment_per_hour,
+            whitelist=self.settings.limits.whitelist,
+        )
+        if not claim.claimed:
+            return claim.status
+        # Claim awaits SQLite: recheck immediately before any platform write.
+        if self.settings.namespace != self.store.ns:
+            await self.store.finish_action(
+                action.id, ActionStatus.FAILED, reason="publishing mode changed before write"
             )
-            if not await self.store.reserve_quota(
-                action.id,
-                action.uid,
-                action.channel,
-                limit,
-                exempt=action.uid in self.settings.limits.whitelist,
-            ):
-                if await self.store.claim_action(action.id):
-                    await self.store.finish_action(action.id, ActionStatus.BLOCKED, reason="quota")
-                return ActionStatus.BLOCKED
-        if not await self.store.claim_action(action.id):
-            return ActionStatus.PENDING
+            return ActionStatus.FAILED
         if self.store.ns == "sim":
             await self.store.finish_action(action.id, ActionStatus.SIMULATED)
             return ActionStatus.SIMULATED

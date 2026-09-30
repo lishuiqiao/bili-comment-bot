@@ -3,13 +3,14 @@
 import asyncio
 import json
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Collection, Iterable
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from pathlib import Path
 
 import aiosqlite
 
-from .domain import ActionStatus, Channel, MessageEvent, PublishAction
+from .domain import ActionKind, ActionStatus, Channel, MessageEvent, PublishAction
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version(version INTEGER PRIMARY KEY);
@@ -37,6 +38,13 @@ CREATE TABLE IF NOT EXISTS cache(
  ns TEXT NOT NULL, key TEXT NOT NULL, payload TEXT NOT NULL, expires REAL NOT NULL,
  PRIMARY KEY(ns,key));
 """
+
+
+@dataclass(frozen=True)
+class ClaimResult:
+    claimed: bool
+    status: ActionStatus
+    reason: str = ""
 
 
 class Store:
@@ -153,69 +161,117 @@ class Store:
             ).fetchall()
             return [PublishAction.model_validate_json(row[0]) for row in rows]
 
-    async def reserve_quota(
-        self, action_id: str, uid: int, channel: Channel, limit: int, exempt: bool = False
-    ) -> bool:
-        async with self.transaction() as db:
-            existing = await (
-                await db.execute(
-                    "SELECT uid,channel,state FROM quota WHERE ns=? AND action_id=?",
-                    (self.ns, action_id),
-                )
-            ).fetchone()
-            if existing:
-                return existing[0] == uid and existing[1] == channel and existing[2] != "released"
-            if exempt:
-                return True
-            now = self.clock()
-            row = await (
-                await db.execute(
-                    "SELECT COUNT(*) FROM quota WHERE ns=? AND uid=? AND channel=? AND "
-                    "(state IN ('reserved','uncertain') OR (state='sent' AND sent_at>?))",
-                    (self.ns, uid, channel, now - 3600),
-                )
-            ).fetchone()
-            if row[0] >= limit:
-                return False
-            await db.execute(
-                "INSERT INTO quota VALUES(?,?,?,?,?,?,NULL)",
-                (self.ns, action_id, uid, channel, "reserved", now),
-            )
-            return True
-
-    async def release_quota(self, action_id: str):
-        async with self.transaction() as db:
-            await db.execute(
-                "UPDATE quota SET state='released' WHERE ns=? AND action_id=? AND state='reserved'",
-                (self.ns, action_id),
-            )
-
-    async def claim_action(self, action_id: str) -> bool:
+    async def claim_action(
+        self,
+        action_id: str,
+        *,
+        dm_limit: int = 5,
+        comment_limit: int = 5,
+        whitelist: Collection[int] = (),
+    ) -> ClaimResult:
+        """Claim and reserve together; quota identity comes only from the stored action."""
+        if dm_limit < 0 or comment_limit < 0:
+            raise ValueError("quota limits cannot be negative")
         async with self.transaction() as db:
             row = await (
                 await db.execute(
-                    "SELECT dependency,status FROM actions WHERE ns=? AND id=?",
+                    "SELECT payload,dependency,status FROM actions WHERE ns=? AND id=?",
                     (self.ns, action_id),
                 )
             ).fetchone()
-            if not row or row[1] != ActionStatus.PENDING:
-                return False
-            if row[0]:
+            if not row:
+                raise ValueError("action does not exist")
+            if row[2] != ActionStatus.PENDING:
+                return ClaimResult(False, ActionStatus(row[2]), "already handled")
+            if row[1]:
                 dependency = await (
                     await db.execute(
-                        "SELECT status FROM actions WHERE ns=? AND id=?", (self.ns, row[0])
+                        "SELECT status FROM actions WHERE ns=? AND id=?", (self.ns, row[1])
                     )
                 ).fetchone()
                 good = {ActionStatus.SUCCEEDED}
                 if self.ns == "sim":
                     good.add(ActionStatus.SIMULATED)
                 if not dependency or dependency[0] not in good:
-                    return False
+                    return ClaimResult(False, ActionStatus.PENDING, "waiting for dependency")
+            action = PublishAction.model_validate_json(row[0])
+            now = self.clock()
+            if action.kind == ActionKind.REPLY:
+                if action.uid is None or action.channel is None:
+                    raise ValueError("reply quota identity missing")
+                if action.uid not in whitelist:
+                    limit = dm_limit if action.channel == Channel.DM else comment_limit
+                    existing = await (
+                        await db.execute(
+                            "SELECT uid,channel,state FROM quota WHERE ns=? AND action_id=?",
+                            (self.ns, action_id),
+                        )
+                    ).fetchone()
+                    if existing and (existing[0] != action.uid or existing[1] != action.channel):
+                        raise RuntimeError("stored quota identity conflicts with action")
+                    # Legacy pending reservations remain attached to their own action.
+                    if not existing or existing[2] == "released":
+                        count = await (
+                            await db.execute(
+                                "SELECT COUNT(*) FROM quota WHERE ns=? AND uid=? AND channel=? "
+                                "AND (state IN ('reserved','uncertain') OR "
+                                "(state='sent' AND sent_at>?))",
+                                (self.ns, action.uid, action.channel, now - 3600),
+                            )
+                        ).fetchone()
+                        if count[0] >= limit:
+                            await self._block_pending(db, action_id, "quota")
+                            return ClaimResult(False, ActionStatus.BLOCKED, "quota")
+                        await db.execute(
+                            "INSERT INTO quota VALUES(?,?,?,?,?,?,NULL) "
+                            "ON CONFLICT(ns,action_id) DO UPDATE SET state='reserved', "
+                            "reserved_at=excluded.reserved_at,sent_at=NULL",
+                            (self.ns, action_id, action.uid, action.channel, "reserved", now),
+                        )
+                    elif existing[2] != "reserved":
+                        raise RuntimeError("pending action has a terminal quota record")
             await db.execute(
                 "UPDATE actions SET status='in_flight',updated=? WHERE ns=? AND id=?",
-                (self.clock(), self.ns, action_id),
+                (now, self.ns, action_id),
             )
-            return True
+            return ClaimResult(True, ActionStatus.IN_FLIGHT)
+
+    async def _block_pending(self, db, action_id: str, reason: str) -> bool:
+        now = self.clock()
+        result = await db.execute(
+            "UPDATE actions SET status='blocked',reason=?,updated=? "
+            "WHERE ns=? AND id=? AND status='pending'",
+            (reason, now, self.ns, action_id),
+        )
+        if result.rowcount != 1:
+            return False
+        await db.execute(
+            "UPDATE quota SET state='released' WHERE ns=? AND action_id=? AND state='reserved'",
+            (self.ns, action_id),
+        )
+        await db.execute(
+            "INSERT INTO audit(ns,action_id,state,reason,created) VALUES(?,?,?,?,?)",
+            (self.ns, action_id, ActionStatus.BLOCKED, reason, now),
+        )
+        return True
+
+    async def block_pending(self, action_id: str, reason: str) -> ActionStatus:
+        """A late safety result must not overwrite another worker's claimed action."""
+        async with self.transaction() as db:
+            await self._block_pending(db, action_id, reason)
+            row = await (
+                await db.execute(
+                    "SELECT status FROM actions WHERE ns=? AND id=?", (self.ns, action_id)
+                )
+            ).fetchone()
+            if not row:
+                raise ValueError("action does not exist")
+            return ActionStatus(row[0])
+
+    async def cancel_pending(self, action_id: str) -> bool:
+        """Cancel only before claim. In-flight/uncertain/sent reservations cannot be freed."""
+        async with self.transaction() as db:
+            return await self._block_pending(db, action_id, "cancelled before claim")
 
     async def finish_action(
         self, action_id: str, status: ActionStatus, remote_id: str | None = None, reason: str = ""
@@ -225,7 +281,6 @@ class Store:
             ActionStatus.FAILED,
             ActionStatus.UNCERTAIN,
             ActionStatus.SIMULATED,
-            ActionStatus.BLOCKED,
         }:
             raise ValueError("invalid terminal action state")
         async with self.transaction() as db:
@@ -245,7 +300,6 @@ class Store:
                 ActionStatus.SUCCEEDED: "sent",
                 ActionStatus.SIMULATED: "sent",
                 ActionStatus.FAILED: "released",
-                ActionStatus.BLOCKED: "released",
                 ActionStatus.UNCERTAIN: "uncertain",
             }[status]
             await db.execute(
