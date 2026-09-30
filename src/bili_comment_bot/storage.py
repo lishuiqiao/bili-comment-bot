@@ -436,6 +436,10 @@ class Store:
             await db.execute(
                 "UPDATE inbox SET status=? WHERE ns=? AND id=?", (status, self.ns, event_id)
             )
+            if status in {"done", "blocked", "ignored"}:
+                await db.execute(
+                    "DELETE FROM work_retries WHERE ns=? AND id=?", (self.ns, event_id)
+                )
 
     async def put_actions(self, actions: Iterable[PublishAction]):
         async with self.transaction() as db:

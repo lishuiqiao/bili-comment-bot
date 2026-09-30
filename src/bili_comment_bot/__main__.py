@@ -145,6 +145,7 @@ def main():
             "cancel-action",
             "verify-action",
             "status",
+            "evaluate",
         ],
     )
     parser.add_argument("--once", action="store_true")
@@ -158,6 +159,11 @@ def main():
     parser.add_argument("--liked", action="store_true")
     parser.add_argument("--uncertain", action="store_true")
     parser.add_argument("--limit", type=int, default=100)
+    parser.add_argument("--eval-mode", choices=["offline", "real"], default="offline")
+    parser.add_argument("--max-cases", type=int, default=100)
+    parser.add_argument("--max-calls", type=int, default=60)
+    parser.add_argument("--eval-concurrency", type=int, default=1)
+    parser.add_argument("--eval-timeout", type=float, default=300)
     args = parser.parse_args()
     if args.command == "demo":
         asyncio.run(demo())
@@ -171,6 +177,28 @@ def main():
         )
     if args.command == "config-check":
         print(f"Configuration valid; mode={settings.namespace}; bot={settings.persona.name}")
+    elif args.command == "evaluate":
+        from .ai.client import AIError
+        from .evaluation import evaluate
+
+        try:
+            report = asyncio.run(
+                evaluate(
+                    settings,
+                    mode=args.eval_mode,
+                    max_cases=args.max_cases,
+                    max_calls=args.max_calls,
+                    concurrency=args.eval_concurrency,
+                    time_budget=args.eval_timeout,
+                )
+            )
+        except (AIError, ValueError, OSError) as error:
+            parser.exit(2, f"Evaluation unavailable ({type(error).__name__}); check config.\n")
+        print(json.dumps(report, ensure_ascii=False))
+        if report["timed_out"] or any(
+            report["counts"][key] for key in ("false_allow", "false_reject", "unknown")
+        ):
+            parser.exit(1)
     else:
         from .adapters.bilibili.errors import (
             CaptchaRequired,

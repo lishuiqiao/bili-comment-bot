@@ -911,6 +911,43 @@ async def test_explicit_business_outcomes_distinguish_skip_rejection_and_defer(t
         assert (await service.process_event_result(event.id)).state == WorkState.SKIPPED
 
 
+@pytest.mark.parametrize("reason", ["unfollowed", "quota"])
+async def test_deferred_event_ignored_on_retry_clears_retry_across_reopen(tmp_path, reason):
+    async with business(tmp_path, live=False, overrides={"limits": {"dm_per_hour": 1}}) as (
+        service,
+        store,
+        fixture,
+        server,
+        _,
+        now,
+    ):
+        fixture.fail_purposes.add("companion")
+        event = await enqueue(store, key="retry-terminal")
+        assert (await service.process_event_result(event.id)).state == WorkState.DEFERRED
+        assert (await store.counts())["work_retries"] == 1
+        # Pending is not terminal and must retain the durable cooldown.
+        await store.finish_event(event.id, "pending")
+        assert not await store.ready_work(event.id)
+        fixture.fail_purposes.clear()
+        if reason == "unfollowed":
+            server.follows = False
+        else:
+            other = await enqueue(store, key="consume-quota")
+            assert (await service.process_event_result(other.id)).state == WorkState.COMPLETED
+        now[0] += 31
+        assert (await service.process_event_result(event.id)).state == WorkState.SKIPPED
+        assert (await store.counts())["work_retries"] == 0
+    reopened = await Store(tmp_path / "state.db", "sim").open()
+    try:
+        counts = await reopened.counts()
+        assert counts["work_retries"] == 0
+        scheduler = scheduler_for(service.settings, reopened)
+        scheduler.last_success = dict.fromkeys(scheduler.jobs(), 10000)
+        assert scheduler.health(counts, alive=True, ready=True)[0] == "normal"
+    finally:
+        await reopened.close()
+
+
 async def test_business_health_startup_disabled_jobs_failure_empty_poll_and_recovery(tmp_path):
     settings = ai_settings(discovery={"invite_uids": [], "keywords": []})
     store = await Store(tmp_path / "state.db", "sim").open()

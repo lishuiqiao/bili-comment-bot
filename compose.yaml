@@ -1,0 +1,21 @@
+services:
+  bot:
+    build: .
+    image: bili-comment-bot:local
+    init: true
+    restart: "no" # 认证失效需要人工扫码；避免自动重启反复访问平台
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 330s # 大于配置允许的最大 shutdown_timeout=300s
+    env_file: .env
+    environment:
+      BILI_BOT_DATA_DIR: /data
+    volumes:
+      - bot-data:/data
+      - ./config.toml:/app/config.toml:ro
+    tmpfs:
+      - /tmp:size=32m,mode=1777
+
+volumes:
+  bot-data:
