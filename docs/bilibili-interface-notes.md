@@ -50,3 +50,14 @@
 自动测试应覆盖 Cookie 刷新中断恢复、关注关系方向、真实 @ 定位、分页与游标、超时导致的发布结果不确定、重启去重、60/90 严格阈值和回复分渠道额度。网络失败不能当作空列表、未关注或发布成功。
 
 发布类请求不得盲目自动重试。平台没有通用幂等键；遇到结果不确定时，应冻结该动作并检查实际发布记录，不能声称实现了平台级 exactly-once。
+
+## 平台基础实现核对（第 3 轮）
+
+- 二维码轮询内部 `data.code`：86101 待扫码、86090 待确认、86038 过期、0 成功；成功凭据来自 Set-Cookie，或仅在缺少必要 Cookie 时解析 passport HTTPS 返回 URL 的查询字段。不会访问返回 URL。来源为上述 SDK 登录实现及发布包。
+- 续期使用服务器毫秒时间。公开 PEM 公钥与 SDK/刷新研究一致；算法测试以独立 RSA 私钥解密确认 `refresh_时间戳` 与 OAEP/SHA-256。确认接口只说明使旧 token 对应 Cookie 失效，**没有公开的重复确认幂等承诺**，因此 confirm_started 的未知结果不自动重发。
+- [WBI 原始研究](https://github.com/pskdje/bilibili-API-collect/blob/main/docs/misc/sign/wbi.md)提供固定向量：img `7cd084941338484aae1ad9425b84077c`、sub `4932caff0ff746eab6f01bf08b70ac45`、mixin `ea1db124af3c7062474693fa704f4ff8`；foo=114/bar=514/zab=1919810、wts=1702204169 的摘要为 `8f6f2b5b3d485fe1886cec6a0be8c5d4`。过滤 `!'()*`，排序，UTF-8 百分号编码，空格按 `%20`。研究中的部分 Python 示例仍用默认 urlencode（空格 `+`），与正文存在冲突，本实现按正文的规范编码。补充合成向量的明确 query 为 `space=one%20one&wts=1&%E4%B8%AD%E6%96%87=%E4%BA%94%E4%B8%80%E5%9B%9B`，拼接上述 mixin 后独立摘要为 `414570c2de009b0d0dd8b3e67ea7a314`。
+- **关注方向的资料冲突**：[关系研究表格](https://github.com/pskdje/bilibili-API-collect/blob/main/docs/user/relation.md)把 relation/be_relation 的方向文字写成与 [实际私信 bot 的 is_following_me 实现](https://github.com/7Hello80/Bilibili_PrivateMessage_Bot/blob/main/index.py)相反。研究示例中 relation.mid 是查询用户，be_relation.mid 是登录用户；原始 bot 用 be_relation.attribute 判断对方关注 bot。本实现验证两个 mid 所属后按实际 bot 的方向处理（属性 1/2/6 代表悄悄/单向/互相关注）。自动 fixture 是该约定的合成验证，**尚非本项目真实双账号单向关注实证**；上线验收仍需分别测试“只有 bot 关注用户”和“只有用户关注 bot”，不能把资料冲突写成已在线证明。
+- [原始评论接口研究](https://github.com/pskdje/bilibili-API-collect/blob/main/docs/comment/action.md)核对 root/parent、rpid、验证码与拒绝码；[OpenCLI 评论原始源码](https://github.com/jackwener/opencli/blob/main/clis/bilibili/comment.js)核对真实提及使用 `at_name_to_mid` 的 JSON 名称→UID 映射与 `@名称` 正文。项目从配置 UID 获取平台名字，发布前重新验证，名字改变不自动换目标。
+- [原始私信研究](https://github.com/pskdje/bilibili-API-collect/blob/main/docs/message/private_msg.md)核对 `msg[dev_id]` 为 UUIDv4、秒级 timestamp、JSON content、2000 字节限制、双 csrf 字段和 WBI 的 `w_sender_uid/w_receiver_id/w_dev_id` 参数。
+
+固定向量为公开协议材料，非当前口令。其余测试响应由协议字段合成，未复制真实账号数据；错误与中断样例是故障注入。源码仅用于核对协议事实，生产代码为本项目独立实现，不调用上述项目，也不执行下载源码。

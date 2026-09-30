@@ -37,6 +37,8 @@ CREATE TABLE IF NOT EXISTS audit(
 CREATE TABLE IF NOT EXISTS cache(
  ns TEXT NOT NULL, key TEXT NOT NULL, payload TEXT NOT NULL, expires REAL NOT NULL,
  PRIMARY KEY(ns,key));
+CREATE TABLE IF NOT EXISTS metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL);
+INSERT OR IGNORE INTO schema_version VALUES (2);
 """
 
 
@@ -70,6 +72,19 @@ class Store:
         if self.db:
             await self.db.close()
             self.db = None
+
+    async def bind_account(self, uid: int):
+        if type(uid) is not int or uid <= 0:
+            raise ValueError("verified account UID must be positive")
+        async with self.transaction() as db:
+            await db.execute(
+                "INSERT OR IGNORE INTO metadata(key,value) VALUES('account_uid',?)", (str(uid),)
+            )
+            row = await (
+                await db.execute("SELECT value FROM metadata WHERE key='account_uid'")
+            ).fetchone()
+            if row[0] != str(uid):
+                raise ValueError("state belongs to another account; use a separate data directory")
 
     @asynccontextmanager
     async def transaction(self):

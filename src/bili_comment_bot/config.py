@@ -4,7 +4,7 @@ import os
 import tomllib
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field, SecretStr, field_validator
+from pydantic import BaseModel, ConfigDict, Field, SecretStr, StrictInt, field_validator
 
 
 class ConfigModel(BaseModel):
@@ -27,7 +27,7 @@ class Persona(ConfigModel):
 
 
 class PlatformConfig(ConfigModel):
-    bot_uid: int = Field(default=0, ge=0)
+    bot_uid: int = Field(default=0, ge=0, strict=True)
     request_timeout: float = Field(default=20, gt=0, le=120)
     read_interval: float = Field(default=1, ge=0.1)
     write_interval: float = Field(default=15, ge=1)
@@ -48,7 +48,7 @@ class AIConfig(ConfigModel):
 class Limits(ConfigModel):
     dm_per_hour: int = Field(default=5, ge=0, le=10000)
     comment_per_hour: int = Field(default=5, ge=0, le=10000)
-    whitelist: list[int] = Field(default_factory=list)
+    whitelist: list[StrictInt] = Field(default_factory=list)
     concurrency: int = Field(default=3, ge=1, le=32)
     max_message_chars: int = Field(default=2000, ge=100, le=20000)
     max_reply_chars: int = Field(default=800, ge=50, le=2000)
@@ -56,7 +56,7 @@ class Limits(ConfigModel):
 
 class Discovery(ConfigModel):
     keywords: list[str] = Field(default_factory=list)
-    invite_uids: list[int] = Field(default_factory=list)
+    invite_uids: list[StrictInt] = Field(default_factory=list)
     interval: float = Field(default=1800, ge=60)
     pages_per_keyword: int = Field(default=1, ge=1, le=10)
     videos_per_cycle: int = Field(default=10, ge=1, le=100)

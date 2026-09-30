@@ -120,7 +120,8 @@ class PublishAction(Contract):
 
 
 class PublishReceipt(Contract):
-    remote_id: str
+    # Likes acknowledge a desired state without assigning a new remote resource ID.
+    remote_id: str | None = Field(default=None, min_length=1)
 
 
 class DefinitelyNotSent(Exception):
