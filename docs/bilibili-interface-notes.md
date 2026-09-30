@@ -51,7 +51,7 @@
 
 发布类请求不得盲目自动重试。平台没有通用幂等键；遇到结果不确定时，应冻结该动作并检查实际发布记录，不能声称实现了平台级 exactly-once。
 
-## 平台基础实现核对（第 3 轮）
+## 认证与签名核对
 
 - 二维码轮询内部 `data.code`：86101 待扫码、86090 待确认、86038 过期、0 成功；成功凭据来自 Set-Cookie，或仅在缺少必要 Cookie 时解析 passport HTTPS 返回 URL 的查询字段。不会访问返回 URL。来源为上述 SDK 登录实现及发布包。
 - 续期使用服务器毫秒时间。公开 PEM 公钥与 SDK/刷新研究一致；算法测试以独立 RSA 私钥解密确认 `refresh_时间戳` 与 OAEP/SHA-256。确认接口只说明使旧 token 对应 Cookie 失效，**没有公开的重复确认幂等承诺**，因此 confirm_started 的未知结果不自动重发。
@@ -62,7 +62,7 @@
 
 固定向量为公开协议材料，非当前口令。其余测试响应由协议字段合成，未复制真实账号数据；错误与中断样例是故障注入。源码仅用于核对协议事实，生产代码为本项目独立实现，不调用上述项目，也不执行下载源码。
 
-## 采集与字幕核对（第 5 轮）
+## 采集与字幕核对
 
 以下补充材料来自联网读取原始仓库文档；其余优先沿用已经下载的本地发布包和研究源码。没有新增可证实的官方稳定性承诺，也没有真实账号请求。
 
@@ -70,11 +70,11 @@
 - [私信原始协议](https://github.com/pskdje/bilibili-API-collect/blob/main/docs/message/private_msg.md)：get_sessions 的 begin_ts/end_ts 与 session_ts 是微秒，size 最大 100；session_type=4 包含全部类型，处理时仅取类型 1。is_follow 表示 bot 关注对方，不能用它取代发送者关注 bot 的门禁。消息列表倒序，begin_seqno/end_seqno 都不包括边界，size=0 或缺省只返回系统提示，本项目显式 100。receiver_type、双方 UID、msg_status 校验后仅转换有效文本；msg_key 以整数读取再构造字符串事件键，避免浮点精度损失。会话发现带目标序号，不能只回复 last_msg。SDK 简化注释“近三十条”与协议的 size 最大 2000 并不等价，本项目按精确协议的显式分页参数实现。
 - 会话时间是否包含边界缺少一致说明，也没有已核对的 UID 次序游标；实现重叠查询并检查前进，相同时间密集边界无法排空时停止该页，不能自称解决任意碰撞。
 - [视频详情原始研究](https://github.com/pskdje/bilibili-API-collect/blob/main/docs/video/info.md)、[搜索研究](https://github.com/pskdje/bilibili-API-collect/blob/main/docs/search/search_request.md)、[评论列表研究](https://github.com/pskdje/bilibili-API-collect/blob/main/docs/comment/list.md)：view 的 pages 中 CID/page/duration/part 与 stat 各计数；视频分类搜索分页 result，aid 去重、标题 em 高亮转纯文本；reply 使用 type=1、sort=2、pn/ps，携带 page.count 和样本截断信息。仅采热门评论，不宣称总体舆情。
-- [播放器原始研究](https://github.com/pskdje/bilibili-API-collect/blob/main/docs/video/player.md)：player/wbi/v2 返回 aid/cid 和 subtitle.subtitles，轨道 lan/subtitle_url，示例资源主机 aisubtitle.hdslb.com。本轮只允许这个确切 HTTPS 主机；如果新增主机，须新增一手依据与目标限制测试。协议相对地址只补 HTTPS，不沿重定向扩展范围。字幕 body 的 from/to/content 时间片与 SDK 的字幕使用方式一致；全部选定分 P 的轨道取得并校验才标完整，没有替代视觉理解。
+- [播放器原始研究](https://github.com/pskdje/bilibili-API-collect/blob/main/docs/video/player.md)：player/wbi/v2 返回 aid/cid 和 subtitle.subtitles，轨道 lan/subtitle_url，示例资源主机 aisubtitle.hdslb.com。下载器只允许这个确切 HTTPS 主机；如果新增主机，须新增一手依据与目标限制测试。协议相对地址只补 HTTPS，不沿重定向扩展范围。字幕 body 的 from/to/content 时间片与 SDK 的字幕使用方式一致；全部选定分 P 的轨道取得并校验才标完整，没有替代视觉理解。
 
 搜索、消息、元数据和字幕样例仍是合成契约测试；接口变化、目标路由、分页结束条件与双账号关系方向须列入 live acceptance。错误码通过脱敏 PlatformError.code 保留，与明确无字幕状态分开；未知结构不会当成没有内容。
 
-## 音频取流核对（第 7 轮）
+## 音频取流核对
 
 本地 SDK 发布包已给出 signed GET `/x/player/wbi/playurl`、avid/cid 和 DASH 音轨字段。缺少 CDN/完整结构时补充联网读取[播放流原始研究](https://raw.githubusercontent.com/pskdje/bilibili-API-collect/master/docs/video/videostream_url.md)。使用 fnval=16 请求普通 DASH，不申请会员绕过。baseUrl/base_url 和备用地址有别名；默认地址同时存在却不一致会拒绝。timelength 为毫秒，dash.duration 为秒。
 

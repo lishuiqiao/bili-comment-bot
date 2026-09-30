@@ -64,6 +64,6 @@ docker compose run --rm bot verify-action --namespace live --action-id '实际�
 
 ## 验证
 
-CI 构建镜像、验证 Compose，以 `--network none` 实际运行容器，检查非 root、持久卷权限/跨容器写入、开发工具排除、无凭据启动失败、打包评测与双命名空间健康。CI 不发布镜像、不部署、不调用真实模型或写 B 站。开发机无 Docker daemon/Compose 插件，本地未执行与 CI 结果分别记录在 [验收矩阵](acceptance-matrix.md)。
+CI 构建镜像、验证 Compose，以 `--network none` 实际运行容器，检查非 root、持久卷权限/跨容器写入、开发工具排除、无凭据启动失败、打包评测与双命名空间健康。CI 不发布镜像、不部署、不调用真实模型或写 B 站。验证范围与真实验收清单见 [验证矩阵](acceptance-matrix.md)。
 
 参考官方 [uv Docker 指南](https://docs.astral.sh/uv/guides/integration/docker/)、[Dockerfile 参考](https://docs.docker.com/reference/dockerfile/) 和 [Compose services](https://docs.docker.com/reference/compose-file/services/)。

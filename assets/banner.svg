@@ -1,0 +1,57 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="380" viewBox="0 0 1200 380" role="img" aria-labelledby="title description">
+  <title id="title">bili-comment-bot</title>
+  <desc id="description">A violet banner with video, conversation and discovery cards.</desc>
+  <defs>
+    <linearGradient id="background" x2="1" y2="1">
+      <stop stop-color="#17192e"/>
+      <stop offset="1" stop-color="#34315d"/>
+    </linearGradient>
+    <linearGradient id="accent" x2="1" y2="1">
+      <stop stop-color="#c7b9ff"/>
+      <stop offset="1" stop-color="#ffb5d5"/>
+    </linearGradient>
+    <linearGradient id="screen" x2="1" y2="1">
+      <stop stop-color="#7661bf"/>
+      <stop offset="1" stop-color="#bc81a8"/>
+    </linearGradient>
+  </defs>
+  <rect width="1200" height="380" rx="28" fill="url(#background)"/>
+  <circle cx="1120" cy="40" r="200" fill="#bbaaff" opacity=".05"/>
+  <circle cx="790" cy="420" r="220" fill="#ffb5d5" opacity=".04"/>
+  <g font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Arial,sans-serif">
+    <rect x="64" y="52" width="48" height="42" rx="14" fill="url(#accent)"/>
+    <path d="M77 91v11l14-11" fill="#d4b8f3"/>
+    <path d="M83 63l14 10-14 10z" fill="#292642"/>
+    <text x="128" y="80" fill="#d4c9ed" font-size="15" font-weight="600" letter-spacing="3">BILIBILI COMPANION</text>
+    <text x="64" y="178" fill="#fff" font-size="60" font-weight="700" letter-spacing="-2">bili-comment-bot</text>
+    <text x="68" y="225" fill="#c4bfd9" font-size="19">Videos, with a little personality.</text>
+    <g font-size="13" font-weight="600" letter-spacing="1">
+      <rect x="68" y="277" width="130" height="35" rx="17.5" fill="#aaa0dd" opacity=".12"/>
+      <text x="92" y="300" fill="#d8d0f2">SUMMARIZE</text>
+      <rect x="211" y="277" width="130" height="35" rx="17.5" fill="#aaa0dd" opacity=".12"/>
+      <text x="238" y="300" fill="#d8d0f2">DISCOVER</text>
+      <rect x="354" y="277" width="130" height="35" rx="17.5" fill="#aaa0dd" opacity=".12"/>
+      <text x="388" y="300" fill="#d8d0f2">CONNECT</text>
+    </g>
+    <g transform="translate(842 58) rotate(5 140 105)">
+      <rect width="280" height="215" rx="20" fill="#595276"/>
+      <rect x="12" y="12" width="256" height="150" rx="12" fill="url(#screen)"/>
+      <path d="M20 138Q75 87 135 135T261 103v48H20z" fill="#e9c4e7" opacity=".24"/>
+      <circle cx="139" cy="84" r="31" fill="#fff" opacity=".92"/>
+      <path d="M132 68l22 16-22 16z" fill="#8868b3"/>
+      <rect x="23" y="180" width="154" height="7" rx="3.5" fill="#cec5e6"/>
+      <rect x="23" y="194" width="103" height="5" rx="2.5" fill="#aaa0c3"/>
+    </g>
+    <g transform="translate(793 218) rotate(-6)">
+      <rect width="234" height="100" rx="18" fill="#ece7fc"/>
+      <path d="M18 84v28l30-28" fill="#ece7fc"/>
+      <circle cx="30" cy="30" r="12" fill="#beaadf"/>
+      <path d="M25 30h10M30 25v10" stroke="#fff" stroke-width="2" stroke-linecap="round"/>
+      <text x="52" y="36" fill="#605174" font-size="13" font-weight="700">A little warmth.</text>
+      <rect x="21" y="56" width="191" height="6" rx="3" fill="#c9bddf"/>
+      <rect x="21" y="72" width="146" height="6" rx="3" fill="#d9d0e8"/>
+    </g>
+    <path d="M1125 277l5 12 12 5-12 5-5 12-5-12-12-5 12-5z" fill="#ffd0e4"/>
+    <path d="M785 86l3 8 8 3-8 3-3 8-3-8-8-3 8-3z" fill="#c3b8ef"/>
+  </g>
+</svg>

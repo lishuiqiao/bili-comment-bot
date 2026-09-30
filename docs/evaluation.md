@@ -3,8 +3,9 @@
 入口只使用 AI/Safety 服务和自写固定资料，不打开认证、数据库、采集或发布适配器。真实模式缺配置即失败，不降级到假模型。
 
 ```sh
-uv run --locked bili-comment-bot --config config.example.toml evaluate > offline-report.json
-uv run --locked bili-comment-bot evaluate --eval-mode real --max-cases 100 --max-calls 60 --eval-concurrency 1 --eval-timeout 300 > model-report.json
+mkdir -p reports
+uv run --locked bili-comment-bot --config config.example.toml evaluate > reports/offline-report.json
+uv run --locked bili-comment-bot evaluate --eval-mode real --max-cases 100 --max-calls 60 --eval-concurrency 1 --eval-timeout 300 > reports/model-report.json
 ```
 
 真实模式需要供应商地址、模型与 `BILI_BOT_AI_API_KEY`，可能计费。当前数据集 26 条，默认最多 60 次 completion 尝试、1 并发、300 秒；参数上限为 100 条/200 次尝试/8 并发/1800 秒。禁用模型重试，每个预算尝试最多一个 HTTP 请求。已开始的尝试即使被取消也不返还预算。总时限取消未完成任务，规则/引用检查不消耗模型预算。

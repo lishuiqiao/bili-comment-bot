@@ -2,6 +2,9 @@
 !Dockerfile
 !pyproject.toml
 !uv.lock
+!README.md
+!LICENSE
+!THIRD_PARTY_NOTICES.md
 !config.example.toml
 !src
 !src/**

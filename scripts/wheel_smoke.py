@@ -4,6 +4,7 @@ import json
 import subprocess
 import sys
 import tempfile
+from importlib.metadata import distribution
 from pathlib import Path
 
 import bili_comment_bot
@@ -13,6 +14,10 @@ repository = Path(sys.argv[1]).resolve()
 package = Path(bili_comment_bot.__file__).resolve()
 assert not package.is_relative_to(repository), package
 assert len(load_cases()[0]) == 26
+metadata = distribution("bili-comment-bot").metadata
+assert metadata["License-Expression"] == "MIT"
+assert set(metadata.get_all("License-File")) == {"LICENSE", "THIRD_PARTY_NOTICES.md"}
+assert not metadata["Author-email"] and not metadata["Maintainer-email"]
 with tempfile.TemporaryDirectory(prefix="bili-bot-wheel-") as folder:
     config = repository / "config.example.toml"
     base = [sys.executable, "-m", "bili_comment_bot", "--config", str(config)]

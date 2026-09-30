@@ -6,7 +6,11 @@ build-backend = "hatchling.build"
 name = "bili-comment-bot"
 version = "0.1.0"
 description = "A personality-driven Bilibili companion and video discovery bot"
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
 requires-python = ">=3.11"
+keywords = ["bilibili", "bot", "companion", "video-summary"]
 dependencies = [
   "aiosqlite>=0.21,<1",
   "httpx>=0.28,<1",
@@ -35,3 +39,11 @@ select = ["E", "F", "I", "B", "UP", "ASYNC"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/bili_comment_bot"]
+
+[tool.hatch.build.targets.sdist]
+only-include = [
+  "src", "tests", "scripts", "docs", "assets", "evals", ".github", ".githooks",
+  "README.md", "LICENSE", "THIRD_PARTY_NOTICES.md", "CONTRIBUTING.md", "SECURITY.md",
+  "pyproject.toml", "uv.lock", "config.example.toml", ".env.example",
+  "Dockerfile", "compose.yaml", ".dockerignore", ".gitignore",
+]

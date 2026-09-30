@@ -1030,7 +1030,8 @@ def test_status_check_cli_exit_codes(
         },
     )
     monkeypatch.setattr(
-        "sys.argv", ["bili-comment-bot", "--config", str(config), "status", "--namespace", "sim", "--check"]
+        "sys.argv",
+        ["bili-comment-bot", "--config", str(config), "status", "--namespace", "sim", "--check"],
     )
     if code:
         with pytest.raises(SystemExit) as error:
@@ -1049,7 +1050,8 @@ def test_status_missing_check_nonzero_and_generic_error_not_called_login(
     config = tmp_path / "config.toml"
     config.write_text("data_dir = " + json.dumps(str(tmp_path)) + "\n")
     monkeypatch.setattr(
-        "sys.argv", ["bili-comment-bot", "--config", str(config), "status", "--namespace", "sim", "--check"]
+        "sys.argv",
+        ["bili-comment-bot", "--config", str(config), "status", "--namespace", "sim", "--check"],
     )
     with pytest.raises(SystemExit) as error:
         main()

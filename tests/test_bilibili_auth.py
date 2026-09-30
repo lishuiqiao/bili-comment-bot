@@ -9,7 +9,12 @@ import pytest
 from pydantic import SecretStr
 from test_bilibili_transport import transport_for
 
-from bili_comment_bot.adapters.bilibili.auth import AuthManager, QRChallenge, QRStatus, correspond_path
+from bili_comment_bot.adapters.bilibili.auth import (
+    AuthManager,
+    QRChallenge,
+    QRStatus,
+    correspond_path,
+)
 from bili_comment_bot.adapters.bilibili.auth_state import CredentialFile, Credentials, RefreshPhase
 from bili_comment_bot.adapters.bilibili.errors import (
     CaptchaRequired,

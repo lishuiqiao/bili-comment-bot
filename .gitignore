@@ -1,6 +1,20 @@
 .env
 .env.*
 !.env.example
+# Local configuration, account state and private notes
+/config.toml
+/config.*.local.toml
+/auth.json
+/login.png
+/.local/
+/backups/
+/reports/
+*-report.json
+/logs/
+*.log
+*.bundle
+*.pem
+*.key
 data/
 *.db
 *.db-shm
