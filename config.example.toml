@@ -1,0 +1,46 @@
+data_dir = "data"
+unsafe_words = []
+
+[persona]
+name = "bili-comment-bot"
+personality = "温柔、真诚，有一点俏皮的日常陪伴者"
+warmth = 0.8
+humor = 0.5
+empathy = 0.8
+
+[platform]
+bot_uid = 0 # 扫码成功后读取账号 UID；配置非零时必须与登录账号一致
+poll_interval = 30
+refresh_interval = 1800
+write_interval = 15
+request_timeout = 20
+max_pages = 20
+
+[ai]
+base_url = "https://api.openai.com/v1"
+model = "" # 或用 BILI_BOT_AI_MODEL 环境变量
+temperature = 0.7 # 模型采样；与 persona.warmth 分开
+
+[limits]
+dm_per_hour = 5
+comment_per_hour = 5
+whitelist = [] # 仅豁免额度；仍要求关注和安全检查
+concurrency = 3
+max_reply_chars = 800
+
+[discovery]
+keywords = ["日常", "搞笑"]
+invite_uids = [] # 填数字 UID；bot 从平台核对名字，再构造真实 @
+interval = 1800
+pages_per_keyword = 1
+videos_per_cycle = 10
+
+[publishing]
+dry_run = true
+publish_enabled = false
+
+[evidence]
+cache_ttl = 3600
+max_video_seconds = 1800
+transcription_enabled = false
+transcription_model = "whisper-1"
