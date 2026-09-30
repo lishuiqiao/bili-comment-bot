@@ -12,7 +12,7 @@ from .adapters.bilibili.auth_state import CredentialFile
 from .adapters.bilibili.client import BilibiliClient
 from .adapters.bilibili.collection import CollectionAPI
 from .adapters.bilibili.download import Downloader
-from .adapters.bilibili.errors import AuthFault
+from .adapters.bilibili.errors import AUTH_FAILURES, AuthFault
 from .adapters.bilibili.transport import BiliTransport
 from .adapters.bilibili.video import VideoAPI
 from .ai.client import AIClient
@@ -25,6 +25,7 @@ from .observability import log_result, write_private
 from .safety import SafetyService
 from .service import BusinessService
 from .storage import Store
+from .work import WorkBatch, WorkResult, WorkState
 
 
 @dataclass
@@ -73,37 +74,52 @@ class Scheduler:
         self.snapshot = snapshot
         self.pool = asyncio.Semaphore(settings.limits.concurrency)
         self.last_success = {}
+        self.last_attempt = {}
+        self.batches = {}
         self.failures = {}
         self.tasks = []
 
     def check(self):
         self.fault.check()
 
-    async def _map(self, values, callback):
+    async def _map(self, values, callback, *, job="events"):
+        def identity(value):
+            if job == "actions":
+                return "action:" + value.id
+            return f"discovery:{value}" if job == "discovery" else value
+
         async def one(value):
             async with self.pool:
                 if self.stop.is_set():
-                    return
+                    return WorkResult(WorkState.SKIPPED)
                 self.check()
+                key = identity(value)
                 try:
-                    await callback(value)
+                    result = await callback(value)
+                    if not isinstance(result, WorkResult):
+                        raise RuntimeError("untyped work outcome")
+                    self.check()
+                    if result.state in {WorkState.COMPLETED, WorkState.FAILED, WorkState.ATTENTION}:
+                        await self.store.clear_work(key)
+                    return result
                 except asyncio.CancelledError:
                     raise
+                except AUTH_FAILURES as error:
+                    self.fault.notify(error)
+                    raise
                 except Exception as error:
-                    # Unexpected event failures must not leave a claimed inbox stranded.
-                    if callback == self.business.process_event:
-                        await self.store.defer_work(value, event=True)
-                    log_result(
-                        "events" if callback == self.business.process_event else "discovery",
-                        "failed",
-                        self.store.ns,
-                        error=error,
-                    )
                     self.check()
+                    await self.store.defer_work(key, event=job == "events")
+                    log_result(job, "failed", self.store.ns, error=error)
+                    return WorkResult(WorkState.FAILED)
 
         children = [asyncio.create_task(one(value)) for value in values]
         try:
-            await asyncio.gather(*children)
+            results = await asyncio.gather(*children)
+            batch = WorkBatch()
+            for result in results:
+                batch.add(result)
+            return batch
         finally:
             for child in children:
                 if not child.done():
@@ -111,13 +127,24 @@ class Scheduler:
             await asyncio.gather(*children, return_exceptions=True)
 
     async def events(self):
-        values = await self.store.pending_events(self.settings.runtime.batch_size)
-        await self._map([value.id for value in values], self.business.process_event)
+        selection = await self.store.event_batch(self.settings.runtime.batch_size)
+        batch = await self._map(
+            [value.id for value in selection.items],
+            self.business.process_event_result,
+            job="events",
+        )
+        batch.counts["attention"] += selection.invalid
+        return batch
 
     async def actions(self):
-        # Per-action atomic claim also protects overlap with event/workflow completion.
-        values = await self.store.pending_actions(self.settings.runtime.batch_size)
-        await self._map(values, self.business.dispatcher.execute)
+        selection = await self.store.action_batch(self.settings.runtime.batch_size)
+
+        async def execute(action):
+            return WorkResult.action(await self.business.dispatcher.execute(action))
+
+        batch = await self._map(selection.items, execute, job="actions")
+        batch.counts["attention"] += selection.invalid
+        return batch
 
     async def search(self):
         if self.settings.discovery.keywords and self.settings.discovery.invite_uids:
@@ -126,20 +153,23 @@ class Scheduler:
 
     async def discovery(self):
         if not self.settings.discovery.invite_uids:
-            return
+            return WorkBatch()
         limit = self.settings.runtime.batch_size
-        # Separate finite budgets prevent a candidate backlog starving persisted flows.
-        flows = await self.store.due_workflows(limit)
+        flows = await self.store.workflow_batch(limit)
         candidates = await self.store.due_candidates(limit)
-        await self._map(flows, self.business.discover_video)
-        await self._map(candidates, self.business.discover_video)
+        batch = await self._map(flows.items, self.business.discover_video_result, job="discovery")
+        batch.merge(
+            await self._map(candidates, self.business.discover_video_result, job="discovery")
+        )
+        batch.counts["attention"] += flows.invalid
+        return batch
 
     async def refresh(self):
         await self.auth.refresh()
 
     def jobs(self):
         settings = self.settings
-        return {
+        jobs = {
             "at": (self.collectors.collect_at, settings.platform.poll_interval),
             "dm": (self.collectors.collect_dms, settings.platform.poll_interval),
             "search": (self.search, settings.discovery.interval),
@@ -149,32 +179,81 @@ class Scheduler:
             "refresh": (self.refresh, settings.platform.refresh_interval),
         }
 
+        if not (settings.discovery.keywords and settings.discovery.invite_uids):
+            jobs.pop("search")
+        if not settings.discovery.invite_uids:
+            jobs.pop("discovery")
+        return jobs
+
+    def health(self, counts, *, alive, ready):
+        if self.fault.event.is_set():
+            return "needs_login", ["authentication"]
+        if not alive:
+            return "stopped", ["process_stopped"]
+        if counts.get("quarantined", 0) or counts.get("actions", {}).get("uncertain", 0):
+            return "attention", [
+                "quarantined_records" if counts.get("quarantined", 0) else "uncertain_actions"
+            ]
+        reasons = [name + "_failed" for name in self.jobs() if self.failures.get(name, 0)]
+        if counts.get("work_retries", 0):
+            reasons.append("pending_retries")
+        if reasons:
+            return "degraded", reasons
+        if not ready or any(name not in self.last_success for name in self.jobs()):
+            return "starting", ["initial_checks"]
+        return "normal", []
+
     async def step(self, name, callback):
         self.check()
         started = self.io.monotonic()
+        self.last_attempt[name] = self.io.wall_clock()
+        batch = None
+        error = None
         try:
-            await callback()
+            result = await callback()
             self.check()
+            if isinstance(result, WorkBatch):
+                batch = result
+                self.batches[name] = dict(batch.counts)
+                if not batch.unhealthy:
+                    if batch.total:
+                        self.failures[name] = 0
+                        self.last_success[name] = self.io.wall_clock()
+                    elif name not in self.last_success and not self.failures.get(name, 0):
+                        # First empty poll checks the store successfully, but a later
+                        # empty batch cannot clear an earlier processing failure.
+                        self.last_success[name] = self.io.wall_clock()
+                    log_result(
+                        name,
+                        "success",
+                        self.store.ns,
+                        duration=self.io.monotonic() - started,
+                        counts=batch.counts,
+                    )
+                    return 0
+            else:
+                self.failures[name] = 0
+                self.last_success[name] = self.io.wall_clock()
+                log_result(name, "success", self.store.ns, duration=self.io.monotonic() - started)
+                return 0
         except asyncio.CancelledError:
             raise
-        except Exception as error:
-            attempt = min(self.failures.get(name, 0) + 1, 6)
-            self.failures[name] = attempt
-            backoff = min(5 * 2 ** (attempt - 1), 300)
-            log_result(
-                name,
-                "failed",
-                self.store.ns,
-                error=error,
-                duration=self.io.monotonic() - started,
-                backoff=backoff,
-            )
+        except Exception as caught:
+            error = caught
             self.check()
-            return backoff
-        self.failures[name] = 0
-        self.last_success[name] = self.io.wall_clock()
-        log_result(name, "success", self.store.ns, duration=self.io.monotonic() - started)
-        return 0
+        attempt = min(self.failures.get(name, 0) + 1, 6)
+        self.failures[name] = attempt
+        backoff = min(5 * 2 ** (attempt - 1), 300)
+        log_result(
+            name,
+            "failed",
+            self.store.ns,
+            error=error,
+            duration=self.io.monotonic() - started,
+            backoff=backoff,
+            counts=batch.counts if batch else None,
+        )
+        return backoff
 
     async def _loop(self, name, callback, interval):
         next_at = self.io.monotonic() + (interval if name == "refresh" else 0)
@@ -199,7 +278,8 @@ class Scheduler:
             for name in ("at", "dm", "search", "events", "actions", "discovery"):
                 if self.stop.is_set():
                     break
-                await self.step(name, self.jobs()[name][0])
+                if name in self.jobs():
+                    await self.step(name, self.jobs()[name][0])
             if self.snapshot:
                 await self.snapshot()
             if any(self.failures.values()):
@@ -284,6 +364,16 @@ async def run_bot(settings, *, once=False, io=None, stop=None, install_signals=T
             alive, ready = True, False
 
             async def snapshot():
+                counts = await store.counts()
+                health, reasons = (
+                    scheduler.health(counts, alive=alive, ready=ready)
+                    if scheduler
+                    else (
+                        ("needs_login", ["authentication"])
+                        if fault.event.is_set()
+                        else ("starting" if alive else "stopped", ["initial_checks"])
+                    )
+                )
                 write_private(
                     settings.data_dir / f"status-{store.ns}.json",
                     {
@@ -294,7 +384,11 @@ async def run_bot(settings, *, once=False, io=None, stop=None, install_signals=T
                         "ready": ready and not fault.event.is_set(),
                         "needs_login": fault.event.is_set(),
                         "auth_error": fault.kind.__name__ if fault.kind else None,
-                        "counts": await store.counts(),
+                        "counts": counts,
+                        "business_health": health,
+                        "degraded_reasons": reasons,
+                        "last_attempt": scheduler.last_attempt if scheduler else {},
+                        "batches": scheduler.batches if scheduler else {},
                         "last_success": scheduler.last_success if scheduler else {},
                         "job_failures": scheduler.failures if scheduler else {},
                         "ai": model.metrics,
@@ -335,6 +429,8 @@ async def run_bot(settings, *, once=False, io=None, stop=None, install_signals=T
                     stop=stop,
                     snapshot=snapshot,
                 )
+                scheduler.last_success["refresh"] = io.wall_clock()
+                scheduler.last_attempt["refresh"] = io.wall_clock()
                 await snapshot()
                 await scheduler.run(once=once)
             finally:

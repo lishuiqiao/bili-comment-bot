@@ -19,6 +19,7 @@ from .domain import (
     MessageEvent,
     PublishAction,
 )
+from .work import DiscoveryWorkflow, Selection
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version(version INTEGER PRIMARY KEY);
@@ -68,6 +69,11 @@ INSERT OR IGNORE INTO workflow_states(ns,id) SELECT ns,id FROM workflows;
 CREATE INDEX IF NOT EXISTS inbox_pending ON inbox(ns,status,created,id);
 CREATE INDEX IF NOT EXISTS actions_pending ON actions(ns,status,updated,id);
 INSERT OR IGNORE INTO schema_version VALUES (5);
+CREATE TABLE IF NOT EXISTS quarantined(
+ ns TEXT NOT NULL, kind TEXT NOT NULL, id TEXT NOT NULL,
+ reason TEXT NOT NULL, created REAL NOT NULL,
+ PRIMARY KEY(ns,kind,id));
+INSERT OR IGNORE INTO schema_version VALUES (6);
 """
 
 
@@ -204,17 +210,45 @@ class Store:
             ).fetchone()
             return row[0] if row else None
 
+    async def _validate_selection(self, db, rows, kind, decode):
+        items, invalid = [], 0
+        for row in rows:
+            try:
+                items.append(decode(row))
+            except (ValueError, TypeError, KeyError, RecursionError):
+                invalid += 1
+                await db.execute(
+                    "INSERT OR IGNORE INTO quarantined VALUES(?,?,?,?,?)",
+                    (self.ns, kind, row["id"], "invalid_payload", self.clock()),
+                )
+                await db.execute(
+                    "INSERT INTO audit(ns,action_id,state,reason,created) VALUES(?,?,?,?,?)",
+                    (self.ns, row["id"], "quarantined", "invalid_payload", self.clock()),
+                )
+        return Selection(items, invalid)
+
     async def pending_events(self, limit: int = 100) -> list[MessageEvent]:
+        return (await self.event_batch(limit)).items
+
+    async def event_batch(self, limit: int) -> Selection:
+        def decode(row):
+            event = MessageEvent.model_validate_json(row["payload"])
+            if event.id != row["id"]:
+                raise ValueError("event binding mismatch")
+            return event
+
         async with self.transaction() as db:
             rows = await (
                 await db.execute(
-                    "SELECT inbox.payload FROM inbox LEFT JOIN work_retries r "
+                    "SELECT inbox.id,inbox.payload FROM inbox LEFT JOIN work_retries r "
                     "ON inbox.ns=r.ns AND inbox.id=r.id WHERE inbox.ns=? AND status='pending' "
-                    "AND COALESCE(r.next_at,0)<=? ORDER BY inbox.created,inbox.id LIMIT ?",
+                    "AND COALESCE(r.next_at,0)<=? AND NOT EXISTS(SELECT 1 FROM quarantined q "
+                    "WHERE q.ns=inbox.ns AND q.kind='events' AND q.id=inbox.id) "
+                    "ORDER BY inbox.created,inbox.id LIMIT ?",
                     (self.ns, self.clock(), limit),
                 )
             ).fetchall()
-            return [MessageEvent.model_validate_json(row[0]) for row in rows]
+            return await self._validate_selection(db, rows, "events", decode)
 
     async def event(self, event_id: str) -> MessageEvent | None:
         async with self.transaction() as db:
@@ -321,21 +355,32 @@ class Store:
             return [row[0] for row in rows]
 
     async def due_workflows(self, limit: int):
+        return (await self.workflow_batch(limit)).items
+
+    async def workflow_batch(self, limit: int) -> Selection:
+        def decode(row):
+            flow = DiscoveryWorkflow.model_validate_json(row["payload"])
+            if row["id"] != f"discovery:{flow.aid}":
+                raise ValueError("workflow binding mismatch")
+            return flow.aid
+
         async with self.transaction() as db:
             rows = await (
                 await db.execute(
-                    "SELECT w.payload FROM workflows w JOIN workflow_states s "
+                    "SELECT w.id,w.payload FROM workflows w JOIN workflow_states s "
                     "ON w.ns=s.ns AND w.id=s.id "
                     "LEFT JOIN work_retries r ON w.ns=r.ns AND w.id=r.id "
                     "WHERE w.ns=? AND s.state!='done' AND COALESCE(r.next_at,0)<=? "
-                    "AND NOT EXISTS(SELECT 1 FROM actions a WHERE a.ns=w.ns AND "
-                    "a.id LIKE w.id||':%' "
+                    "AND NOT EXISTS(SELECT 1 FROM quarantined q WHERE q.ns=w.ns "
+                    "AND q.kind='discovery' AND q.id=w.id) "
+                    "AND NOT EXISTS(SELECT 1 FROM actions a WHERE a.ns=w.ns "
+                    "AND a.id LIKE w.id||':%' "
                     "AND a.status IN ('uncertain','in_flight','failed','blocked')) "
                     "ORDER BY COALESCE(r.next_at,0),w.id LIMIT ?",
                     (self.ns, self.clock(), limit),
                 )
             ).fetchall()
-            return [json.loads(row[0])["aid"] for row in rows]
+            return await self._validate_selection(db, rows, "discovery", decode)
 
     async def discovery_state(self, key: str, state: str):
         if state not in {"pending", "paused", "done"}:
@@ -406,17 +451,33 @@ class Store:
             return dict(row) if row else None
 
     async def pending_actions(self, limit: int = 100) -> list[PublishAction]:
+        return (await self.action_batch(limit)).items
+
+    async def action_batch(self, limit: int) -> Selection:
+        def decode(row):
+            action = PublishAction.model_validate_json(row["payload"])
+            if action.id != row["id"] or action.dependency != row["dependency"]:
+                raise ValueError("action binding mismatch")
+            return action
+
         async with self.transaction() as db:
             rows = await (
                 await db.execute(
-                    "SELECT a.payload FROM actions a WHERE a.ns=? AND a.status='pending' "
-                    "AND (a.dependency IS NULL OR EXISTS (SELECT 1 FROM actions d "
+                    "SELECT a.id,a.payload,a.dependency FROM actions a LEFT JOIN work_retries r "
+                    "ON a.ns=r.ns AND r.id='action:'||a.id WHERE a.ns=? AND a.status='pending' "
+                    "AND COALESCE(r.next_at,0)<=? AND NOT EXISTS(SELECT 1 FROM quarantined q "
+                    "WHERE q.ns=a.ns AND q.kind='actions' AND q.id=a.id) "
+                    "AND (a.dependency IS NULL OR EXISTS(SELECT 1 FROM actions d "
                     "WHERE d.ns=a.ns AND d.id=a.dependency AND (d.status='succeeded' OR "
                     "(d.ns='sim' AND d.status='simulated')))) ORDER BY a.updated,a.id LIMIT ?",
-                    (self.ns, limit),
+                    (self.ns, self.clock(), limit),
                 )
             ).fetchall()
-            return [PublishAction.model_validate_json(row[0]) for row in rows]
+            return await self._validate_selection(db, rows, "actions", decode)
+
+    async def clear_work(self, key: str):
+        async with self.transaction() as db:
+            await db.execute("DELETE FROM work_retries WHERE ns=? AND id=?", (self.ns, key))
 
     async def claim_action(
         self,
@@ -510,6 +571,9 @@ class Store:
             "INSERT INTO audit(ns,action_id,state,reason,created) VALUES(?,?,?,?,?)",
             (self.ns, action_id, ActionStatus.BLOCKED, reason, now),
         )
+        await db.execute(
+            "DELETE FROM work_retries WHERE ns=? AND id=?", (self.ns, "action:" + action_id)
+        )
         return True
 
     async def block_pending(self, action_id: str, reason: str) -> ActionStatus:
@@ -552,6 +616,9 @@ class Store:
             await db.execute(
                 "UPDATE actions SET status=?,remote_id=?,reason=?,updated=? WHERE ns=? AND id=?",
                 (status, remote_id, reason, now, self.ns, action_id),
+            )
+            await db.execute(
+                "DELETE FROM work_retries WHERE ns=? AND id=?", (self.ns, "action:" + action_id)
             )
             quota_state = {
                 ActionStatus.SUCCEEDED: "sent",
@@ -686,7 +753,7 @@ class Store:
                     )
                 ).fetchall()
                 result[table] = {row[0]: row[1] for row in rows}
-            for table in ("work_retries", "discovery_jobs", "collection_jobs"):
+            for table in ("work_retries", "discovery_jobs", "collection_jobs", "quarantined"):
                 result[table] = (
                     await (
                         await db.execute(f"SELECT COUNT(*) FROM {table} WHERE ns=?", (self.ns,))
@@ -708,7 +775,14 @@ class Store:
                     "id": row[0],
                     "status": row[1],
                     "remote_id": row[2],
-                    "kind": json.loads(row[3])["kind"],
+                    "kind": self._summary_kind(row[3]),
                 }
                 for row in rows
             ]
+
+    @staticmethod
+    def _summary_kind(payload):
+        try:
+            return PublishAction.model_validate_json(payload).kind.value
+        except (ValueError, RecursionError):
+            return "invalid"

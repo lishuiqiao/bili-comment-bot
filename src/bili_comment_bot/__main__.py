@@ -148,6 +148,7 @@ def main():
         ],
     )
     parser.add_argument("--once", action="store_true")
+    parser.add_argument("--check", action="store_true")
     parser.add_argument("--namespace", choices=["sim", "live"])
     parser.add_argument("--action-id")
     parser.add_argument("--remote-id")
@@ -191,9 +192,10 @@ def main():
 
                 if args.namespace is None:
                     parser.error("status requires --namespace sim|live")
-                print(
-                    json.dumps(read_status(settings.data_dir, args.namespace), ensure_ascii=False)
-                )
+                status = read_status(settings.data_dir, args.namespace)
+                print(json.dumps(status, ensure_ascii=False))
+                if args.check and not status["healthy"]:
+                    parser.exit(1)
             else:
                 from .operations import operate
 
@@ -226,11 +228,11 @@ def main():
         except LoginExpired:
             parser.exit(2, "登录已失效或尚未登录；请运行 login 扫码。\n")
         except (OSError, ValueError, RuntimeError, TimeoutError) as error:
-            parser.exit(2, f"登录操作未完成（{type(error).__name__}）；检查配置和连接后重试。\n")
+            parser.exit(2, f"操作未完成（{type(error).__name__}）；检查配置、状态和连接后重试。\n")
         except Exception as error:
             # Sanitized failure class only; response/request objects can contain secrets.
             parser.exit(
-                2, f"平台操作未完成（{type(error).__name__}）；失效或验证码时请重新扫码。\n"
+                2, f"操作未完成（{type(error).__name__}）；检查状态，失效或验证码时请重新扫码。\n"
             )
 
 

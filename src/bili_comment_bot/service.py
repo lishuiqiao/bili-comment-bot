@@ -2,8 +2,6 @@
 
 import asyncio
 
-from pydantic import model_validator
-
 from .adapters.bilibili.errors import PlatformError
 from .ai.client import AIError
 from .ai.prompts import POLICY_VERSION, PROMPT_VERSION
@@ -13,36 +11,15 @@ from .domain import (
     ActionKind,
     ActionStatus,
     Channel,
-    Contract,
     Decision,
     FollowState,
     PublishAction,
-    VideoEvidence,
-    VideoScore,
 )
 from .policy import discovery_steps
 from .storage import Store
+from .work import DiscoveryWorkflow, WorkResult, WorkState
 
 SUCCESS = {ActionStatus.SUCCEEDED, ActionStatus.SIMULATED}
-
-
-class DiscoveryWorkflow(Contract):
-    aid: int
-    evidence: VideoEvidence
-    score: VideoScore
-    heat: dict
-    invite_uids: list[int]
-    policy_version: str
-    prompt_version: str
-    model: str
-
-    @model_validator(mode="after")
-    def evidence_binding(self):
-        if self.aid != self.evidence.aid or not self.evidence.usable:
-            raise ValueError("workflow evidence must be usable and bound to target")
-        if self.score.heat != self.heat.get("score"):
-            raise ValueError("heat must match the objective report")
-        return self
 
 
 class BusinessService:
@@ -59,15 +36,20 @@ class BusinessService:
         ]
 
     async def process_event(self, event_id: str) -> ActionStatus | None:
+        return (await self.process_event_result(event_id)).value
+
+    async def process_event_result(self, event_id: str) -> WorkResult:
         if not await self.store.ready_work(event_id) or not await self.store.claim_event(event_id):
-            return None
+            return WorkResult(WorkState.SKIPPED)
         event = await self.store.event(event_id)
         action_id = "reply:" + event.id
         existing = await self.store.action(action_id)
         if existing:
             await self.store.complete_event(event.id, [])
-            return await self.dispatcher.execute(
-                PublishAction.model_validate_json(existing["payload"])
+            return WorkResult.action(
+                await self.dispatcher.execute(
+                    PublishAction.model_validate_json(existing["payload"])
+                )
             )
         try:
             if event.channel == Channel.DM:
@@ -76,14 +58,16 @@ class BusinessService:
                     raise AIError("follow_state_unknown")
                 if follows != FollowState.YES:
                     await self.store.finish_event(event.id, "ignored")
-                    return None
+                    return WorkResult(WorkState.SKIPPED)
             limits = self.settings.limits
             quota = limits.dm_per_hour if event.channel == Channel.DM else limits.comment_per_hour
             if not await self.store.quota_available(
                 event.uid, event.channel, quota, limits.whitelist
             ):
                 await self.store.finish_event(event.id, "ignored")
-                return None  # No quota message; final authority remains Dispatcher.claim_action.
+                return WorkResult(
+                    WorkState.SKIPPED
+                )  # No quota message; final authority remains Dispatcher.claim_action.
             verdict = await self.safety.check_input(event, None)
             evidence = None
             if verdict.decision == Decision.UNKNOWN:
@@ -134,20 +118,23 @@ class BusinessService:
             )
             # Durable reply and completed event are one transaction. Publishing follows it.
             await self.store.complete_event(event.id, [action])
-            return await self.dispatcher.execute(action)
+            return WorkResult.action(await self.dispatcher.execute(action))
         except (AIError, PlatformError):
             await self.store.defer_work(event.id, event=True)
-            return None
+            return WorkResult(WorkState.DEFERRED)
 
     async def discover_video(self, aid: int) -> list[ActionStatus]:
+        return (await self.discover_video_result(aid)).value or []
+
+    async def discover_video_result(self, aid: int) -> WorkResult:
         if type(aid) is not int or aid <= 0:
             raise ValueError("video aid must be a positive integer")
         key = f"discovery:{aid}"
         if not self.settings.discovery.invite_uids or not await self.store.ready_work(key):
-            return []
+            return WorkResult(WorkState.SKIPPED, [])
         async with self.discovery_lock:
             if not await self.store.ready_work(key):
-                return []
+                return WorkResult(WorkState.SKIPPED, [])
             try:
                 result = await self._discover(aid, key)
                 if not await self.store.workflow(key):
@@ -162,10 +149,16 @@ class BusinessService:
                         and all(status in SUCCESS for status in result)
                     )
                     await self.store.discovery_state(key, "done" if done else "paused")
-                return result
+                state = WorkResult.action(result[-1]).state if result else WorkState.SKIPPED
+                for status in result:
+                    outcome = WorkResult.action(status).state
+                    if outcome in {WorkState.FAILED, WorkState.ATTENTION}:
+                        state = outcome
+                        break
+                return WorkResult(state, result)
             except (AIError, PlatformError):
                 await self.store.defer_work(key)
-                return []
+                return WorkResult(WorkState.DEFERRED, [])
 
     async def _discover(self, aid: int, key: str) -> list[ActionStatus]:
         raw = await self.store.workflow(key)

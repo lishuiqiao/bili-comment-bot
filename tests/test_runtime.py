@@ -9,7 +9,7 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
-from ai_fixtures import FixtureAI, ai_settings
+from ai_fixtures import FixtureAI, ai_settings, video_evidence
 from bili_read_fixtures import at_item, at_response, dm, session, video_details
 from pydantic import SecretStr
 from test_bilibili_auth import cookie_headers, credentials, nav, ok
@@ -29,6 +29,7 @@ from bili_comment_bot.adapters.bilibili.errors import (
 )
 from bili_comment_bot.adapters.bilibili.transport import BiliTransport
 from bili_comment_bot.ai.client import AIClient, AIError
+from bili_comment_bot.ai.prompts import POLICY_VERSION, PROMPT_VERSION
 from bili_comment_bot.domain import (
     ActionKind,
     ActionStatus,
@@ -36,12 +37,14 @@ from bili_comment_bot.domain import (
     Decision,
     LikeStateEvidence,
     PublishAction,
+    VideoScore,
 )
 from bili_comment_bot.instance_lock import InstanceInUse, InstanceLock
 from bili_comment_bot.observability import log_result, read_status, write_private
 from bili_comment_bot.operations import operate
 from bili_comment_bot.runtime import RuntimeIO, Scheduler, run_bot
 from bili_comment_bot.storage import Store
+from bili_comment_bot.work import DiscoveryWorkflow, WorkBatch, WorkResult, WorkState
 
 
 class RuntimeServer:
@@ -265,10 +268,9 @@ def approved(key, *, dependency=None, kind=ActionKind.ENCOURAGE):
 async def test_schema4_migration_durable_due_candidates_isolation_and_dependency_fairness(tmp_path):
     path = tmp_path / "state.db"
     db = sqlite3.connect(path)
-    db.executescript(
-        "CREATE TABLE workflows(ns TEXT,id TEXT,payload TEXT,PRIMARY KEY(ns,id));"
-        'INSERT INTO workflows VALUES("live","discovery:9",\'{"aid":9}\');'
-    )
+    db.executescript("CREATE TABLE workflows(ns TEXT,id TEXT,payload TEXT,PRIMARY KEY(ns,id));")
+    db.execute("INSERT INTO workflows VALUES(?,?,?)", ("live", "discovery:9", flow_payload(9)))
+    db.commit()
     db.close()
     now = [10000]
     store = await Store(path, "sim", clock=lambda: now[0]).open()
@@ -512,7 +514,14 @@ def test_allowlist_logs_and_private_stale_status_do_not_contain_injected_data(tm
         log_result("private-message", "failed", "live")
     write_private(
         tmp_path / "status-live.json",
-        {"mode": "live", "updated_at": 1, "stale_after": 10, "alive": True, "ready": True},
+        {
+            "mode": "live",
+            "updated_at": 1,
+            "stale_after": 10,
+            "alive": True,
+            "ready": True,
+            "business_health": "normal",
+        },
     )
     assert read_status(tmp_path, "live", now=lambda: 2)["healthy"]
     assert not read_status(tmp_path, "live", now=lambda: 12)["healthy"]
@@ -557,6 +566,7 @@ async def test_bounded_pool_no_overlap_and_independent_jobs_with_slow_collector(
             entered.set()
         await release.wait()
         active -= 1
+        return WorkResult(WorkState.COMPLETED)
 
     try:
         batch = asyncio.create_task(scheduler._map(range(6), blocked))
@@ -715,3 +725,295 @@ async def test_failed_store_initialization_closes_connection_without_leaking(tmp
     with pytest.raises(sqlite3.OperationalError):
         await store.open()
     assert store.db is None
+
+
+def flow_payload(aid):
+    return DiscoveryWorkflow(
+        aid=aid,
+        evidence=video_evidence(aid=aid),
+        score=VideoScore(
+            heat=0.0,
+            recommendation=99.0,
+            absurdity=99.0,
+            reasons=["热度依据", "推荐依据", "抽象依据"],
+        ),
+        heat={"score": 0.0},
+        invite_uids=[123],
+        policy_version=POLICY_VERSION,
+        prompt_version=PROMPT_VERSION,
+        model="fixture-model",
+    ).model_dump_json()
+
+
+async def test_discovery_unexpected_failures_are_typed_backoff_persistent_and_fair(tmp_path):
+    settings = ai_settings(runtime={"batch_size": 2})
+    now = [10000]
+    path = tmp_path / "state.db"
+    store = await Store(path, "sim", clock=lambda: now[0]).open()
+    calls = []
+
+    async def handle(aid):
+        calls.append(aid)
+        if aid in {1, 2}:
+            raise RuntimeError("private failed workflow text")
+        await store.discovery_state(f"discovery:{aid}", "done")
+        return WorkResult(WorkState.COMPLETED)
+
+    service = SimpleNamespace(discover_video_result=handle)
+    scheduler = scheduler_for(settings, store, business_service=service)
+    try:
+        for aid in (1, 2, 3):
+            await store.put_workflow(f"discovery:{aid}", flow_payload(aid))
+        assert await scheduler.step("discovery", scheduler.discovery) == 5
+        assert scheduler.failures["discovery"] == 1
+        assert scheduler.batches["discovery"]["failed"] == 2
+        assert await store.due_workflows(2) == [3]
+        await scheduler.step("discovery", scheduler.discovery)
+        assert calls == [1, 2, 3]
+        assert await store.due_workflows(2) == []
+    finally:
+        await store.close()
+    reopened = await Store(path, "sim", clock=lambda: now[0]).open()
+    try:
+        assert await reopened.due_workflows(2) == []
+        now[0] += 30
+        assert await reopened.due_workflows(2) == [1, 2]
+
+        async def good(aid):
+            await reopened.discovery_state(f"discovery:{aid}", "done")
+            return WorkResult(WorkState.COMPLETED)
+
+        service.discover_video_result = good
+        scheduler = scheduler_for(settings, reopened, business_service=service)
+        assert await scheduler.step("discovery", scheduler.discovery) == 0
+        assert (await reopened.counts())["work_retries"] == 0
+    finally:
+        await reopened.close()
+
+
+async def test_action_exception_backoff_does_not_reset_unknown_or_retry_before_due(tmp_path):
+    settings, now = ai_settings(), [10000]
+    store = await Store(tmp_path / "state.db", "sim", clock=lambda: now[0]).open()
+    calls = []
+
+    async def fail(action):
+        calls.append(action.id)
+        if action.id == "a":
+            raise RuntimeError("private")
+        await store.claim_action(action.id)
+        await store.finish_action(action.id, ActionStatus.SIMULATED)
+        return ActionStatus.SIMULATED
+
+    service = SimpleNamespace(dispatcher=SimpleNamespace(execute=fail))
+    scheduler = scheduler_for(settings, store, business_service=service)
+    try:
+        await store.put_actions([approved("a"), approved("b")])
+        assert await scheduler.step("actions", scheduler.actions) == 5
+        assert calls == ["a", "b"]
+        assert scheduler.batches["actions"] == dict(
+            completed=1, skipped=0, deferred=0, failed=1, attention=0
+        )
+        assert await store.pending_actions() == []
+        await scheduler.step("actions", scheduler.actions)
+        assert calls == ["a", "b"] and scheduler.failures["actions"] == 1
+        now[0] += 30
+        assert [a.id for a in await store.pending_actions()] == ["a"]
+        await store.claim_action("a")
+        await store.finish_action("a", ActionStatus.UNCERTAIN)
+        assert not await store.pending_actions()
+        assert (await store.counts())["work_retries"] == 0
+        await store.recover()
+        assert (await store.action("a"))["status"] == ActionStatus.UNCERTAIN
+    finally:
+        await store.close()
+
+
+@pytest.mark.parametrize("kind", ["events", "actions", "discovery"])
+async def test_invalid_payload_quarantines_one_record_preserves_raw_and_processes_others(
+    tmp_path, kind
+):
+    async with business(tmp_path, live=False) as (service, store, fixture, _, _, _):
+        if kind == "events":
+            await enqueue(store, key="a-bad")
+            await enqueue(store, key="z-good")
+            table, key = "inbox", "a-bad"
+        elif kind == "actions":
+            await store.put_actions([approved("a-bad"), approved("z-good")])
+            table, key = "actions", "a-bad"
+        else:
+            await store.put_workflow("discovery:1", flow_payload(1))
+            await store.put_workflow("discovery:2", flow_payload(2))
+            table, key = "workflows", "discovery:1"
+
+            async def complete(aid):
+                assert aid == 2
+                await store.discovery_state("discovery:2", "done")
+                return WorkResult(WorkState.COMPLETED)
+
+            service.discover_video_result = complete
+        async with store.transaction() as db:
+            await db.execute(
+                f"UPDATE {table} SET payload=? WHERE ns=? AND id=?",
+                ("private-broken", store.ns, key),
+            )
+        scheduler = scheduler_for(service.settings, store, business_service=service)
+        callback = getattr(scheduler, kind)
+        assert await scheduler.step(kind, callback) == 5
+        assert scheduler.batches[kind]["attention"] == 1
+        assert scheduler.batches[kind]["completed"] == 1
+        async with store.transaction() as db:
+            raw = await (
+                await db.execute(
+                    f"SELECT payload FROM {table} WHERE ns=? AND id=?", (store.ns, key)
+                )
+            ).fetchone()
+            assert raw[0] == "private-broken"
+            audit = await (
+                await db.execute("SELECT reason FROM audit WHERE state='quarantined'")
+            ).fetchone()
+            assert audit[0] == "invalid_payload"
+        assert (await store.counts())["quarantined"] == 1
+        assert await scheduler.step(kind, callback) == 0
+        assert scheduler.batches[kind]["attention"] == 0
+        assert scheduler.health(await store.counts(), alive=True, ready=True)[0] == "attention"
+
+
+async def test_once_reports_real_ai_failure_but_normal_rejection_low_score_and_no_work_pass(
+    tmp_path,
+):
+    settings, server, fixture = runtime_settings(tmp_path), RuntimeServer(), FixtureAI()
+    CredentialFile(tmp_path / "auth.json").save(credentials())
+    fixture.fail_purposes = {"companion"}
+    with pytest.raises(RuntimeError):
+        await run_bot(settings, once=True, io=io_for(server, fixture), install_signals=False)
+    state = read_status(tmp_path, "sim", now=lambda: 10000)
+    assert state["job_failures"]["events"] == 1
+    assert state["batches"]["events"]["deferred"] == 1
+    fixture.fail_purposes = set()
+    fixture.recommendation = fixture.absurdity = 0.0
+    # Not-due deferred work is a normal no-op, not another failure of this --once pass.
+    await run_bot(settings, once=True, io=io_for(server, fixture), install_signals=False)
+    assert read_status(tmp_path, "sim", now=lambda: 10000)["counts"]["work_retries"] == 1
+
+
+async def test_explicit_business_outcomes_distinguish_skip_rejection_and_defer(tmp_path):
+    async with business(tmp_path, live=False) as (service, store, fixture, server, _, _):
+        event = await enqueue(store, key="refusal", text="请帮我写代码")
+        assert (await service.process_event_result(event.id)).state == WorkState.COMPLETED
+        assert (await service.process_event_result(event.id)).state == WorkState.SKIPPED
+        server.follows = False
+        event = await enqueue(store, key="unfollowed")
+        assert (await service.process_event_result(event.id)).state == WorkState.SKIPPED
+        server.follows = True
+        fixture.fail_purposes.add("companion")
+        event = await enqueue(store, key="deferred")
+        assert (await service.process_event_result(event.id)).state == WorkState.DEFERRED
+        assert (await service.process_event_result(event.id)).state == WorkState.SKIPPED
+
+
+async def test_business_health_startup_disabled_jobs_failure_empty_poll_and_recovery(tmp_path):
+    settings = ai_settings(discovery={"invite_uids": [], "keywords": []})
+    store = await Store(tmp_path / "state.db", "sim").open()
+    scheduler = scheduler_for(settings, store)
+    try:
+        counts = await store.counts()
+        assert "search" not in scheduler.jobs() and "discovery" not in scheduler.jobs()
+        assert scheduler.health(counts, alive=True, ready=True)[0] == "starting"
+        for name in scheduler.jobs():
+            scheduler.last_success[name] = 10000
+        assert scheduler.health(counts, alive=True, ready=True) == ("normal", [])
+
+        async def bad():
+            raise NetworkFault()
+
+        assert await scheduler.step("at", bad) == 5
+        assert scheduler.health(counts, alive=True, ready=True) == ("degraded", ["at_failed"])
+
+        async def good():
+            return 0
+
+        assert await scheduler.step("at", good) == 0
+        assert scheduler.health(counts, alive=True, ready=True)[0] == "normal"
+
+        async def failed_batch():
+            batch = WorkBatch()
+            batch.add(WorkResult(WorkState.DEFERRED))
+            return batch
+
+        await scheduler.step("events", failed_batch)
+
+        async def empty():
+            return WorkBatch()
+
+        await scheduler.step("events", empty)
+        assert scheduler.failures["events"] == 1  # No empty-tick fake recovery.
+
+        async def recovered():
+            batch = WorkBatch()
+            batch.add(WorkResult(WorkState.COMPLETED))
+            return batch
+
+        await scheduler.step("events", recovered)
+        assert scheduler.health(counts, alive=True, ready=True)[0] == "normal"
+        scheduler.fault.notify(LoginExpired())
+        assert scheduler.health(counts, alive=False, ready=False)[0] == "needs_login"
+    finally:
+        await store.close()
+
+
+@pytest.mark.parametrize(
+    "health,alive,ready,stale,code",
+    [
+        ("normal", True, True, False, 0),
+        ("normal", True, True, True, 1),
+        ("starting", True, True, False, 1),
+        ("degraded", True, True, False, 1),
+        ("needs_login", False, False, False, 1),
+        ("stopped", False, False, False, 1),
+    ],
+)
+def test_status_check_cli_exit_codes(
+    tmp_path, monkeypatch, capsys, health, alive, ready, stale, code
+):
+    import time
+
+    from bili_comment_bot.__main__ import main
+
+    config = tmp_path / "config.toml"
+    config.write_text("data_dir = " + json.dumps(str(tmp_path)) + "\n")
+    write_private(
+        tmp_path / "status-sim.json",
+        {
+            "mode": "sim",
+            "updated_at": time.time() - (100 if stale else 0),
+            "stale_after": 30,
+            "alive": alive,
+            "ready": ready,
+            "business_health": health,
+        },
+    )
+    monkeypatch.setattr(
+        "sys.argv", ["bili-comment-bot", "--config", str(config), "status", "--namespace", "sim", "--check"]
+    )
+    if code:
+        with pytest.raises(SystemExit) as error:
+            main()
+        assert error.value.code == code
+    else:
+        main()
+    assert json.loads(capsys.readouterr().out)["healthy"] == (code == 0)
+
+
+def test_status_missing_check_nonzero_and_generic_error_not_called_login(
+    tmp_path, monkeypatch, capsys
+):
+    from bili_comment_bot.__main__ import main
+
+    config = tmp_path / "config.toml"
+    config.write_text("data_dir = " + json.dumps(str(tmp_path)) + "\n")
+    monkeypatch.setattr(
+        "sys.argv", ["bili-comment-bot", "--config", str(config), "status", "--namespace", "sim", "--check"]
+    )
+    with pytest.raises(SystemExit) as error:
+        main()
+    assert error.value.code != 0 and "登录操作" not in capsys.readouterr().err

@@ -22,7 +22,9 @@ def error_category(error):
     return "unexpected"
 
 
-def log_result(job: str, result: str, mode: str, *, error=None, duration=0.0, backoff=0.0):
+def log_result(
+    job: str, result: str, mode: str, *, error=None, duration=0.0, backoff=0.0, counts=None
+):
     if (
         job not in JOBS
         or result not in {"success", "failed", "stopped", "starting"}
@@ -36,6 +38,12 @@ def log_result(job: str, result: str, mode: str, *, error=None, duration=0.0, ba
         "duration_seconds": round(duration, 3),
         "backoff_seconds": backoff,
     }
+    if counts is not None:
+        if set(counts) != {"completed", "skipped", "deferred", "failed", "attention"} or any(
+            type(value) is not int or value < 0 for value in counts.values()
+        ):
+            raise ValueError("invalid outcome counts")
+        record["counts"] = dict(counts)
     if error is not None:
         record["error"] = error_category(error)
     logging.getLogger("bili_comment_bot.runtime").info(json.dumps(record, sort_keys=True))
@@ -60,5 +68,10 @@ def read_status(directory: Path, namespace: str, *, now=time.time) -> dict:
     if value.get("mode") != namespace:
         raise ValueError("status namespace mismatch")
     value["stale"] = now() - value["updated_at"] > value["stale_after"]
-    value["healthy"] = value["alive"] and value["ready"] and not value["stale"]
+    value["healthy"] = (
+        value["alive"]
+        and value["ready"]
+        and not value["stale"]
+        and value.get("business_health") == "normal"
+    )
     return value
