@@ -98,16 +98,25 @@ def supplied_evidence(kind: str) -> VideoEvidence | None:
 
 class BudgetClient:
     def __init__(self, client, max_calls):
-        self.client, self.max_calls, self.calls = client, max_calls, 0
+        self.client, self.max_calls, self.attempts = client, max_calls, 0
+        self.http_requests = 0
         self.trace = ContextVar("evaluation_trace", default=None)
+        if client:
+            client.client.event_hooks["request"].append(self.record_request)
+
+    async def record_request(self, request):
+        # httpx runs the hook immediately before sending, after AI input/rate checks.
+        # Only counts dispatch attempts; no headers, URL, body or credentials are retained.
+        self.http_requests += 1
+        self.trace.get()["http_requests"] += 1
 
     async def complete(self, *args):
         trace = self.trace.get()
         try:
-            if self.calls >= self.max_calls:
+            if self.attempts >= self.max_calls:
                 raise AIError("evaluation_call_budget")
-            self.calls += 1
-            trace["calls"] += 1
+            self.attempts += 1
+            trace["completion_attempts"] += 1
             return await self.client.complete(*args)
         except AIError as error:
             trace["errors"].append(error.reason)
@@ -156,14 +165,15 @@ async def evaluate(
 
     async def one(case):
         async with semaphore:
-            trace = {"calls": 0, "errors": []}
+            trace = {"completion_attempts": 0, "http_requests": 0, "errors": []}
             token = budget.trace.set(trace)
             row = {
                 "id": case.id,
                 "kind": case.kind,
                 "expected": case.expected,
                 "status": "not_evaluated",
-                "calls": 0,
+                "completion_attempts": 0,
+                "http_requests": 0,
             }
             evidence = supplied_evidence(case.evidence)
             try:
@@ -217,14 +227,12 @@ async def evaluate(
                         actual = (await safety.check_source(evidence)).decision.value
                     elif case.kind == "output":
                         actual = (
-                            "allow"
-                            if await safety.check_output(
+                            await safety.assess_output(
                                 case.text,
                                 purpose=case.purpose,
                                 evidence=evidence,
                             )
-                            else "reject"
-                        )
+                        ).decision.value
                     else:
                         text = await generator.generate(
                             case.purpose,
@@ -233,7 +241,7 @@ async def evaluate(
                             evidence=evidence,
                             reason="evaluation_request",
                         )
-                        safe = await safety.check_output(
+                        verdict = await safety.assess_output(
                             text, purpose=case.purpose, evidence=evidence, message=case.text
                         )
                         row.update(
@@ -241,18 +249,20 @@ async def evaluate(
                             purpose=case.purpose,
                             human_ratings={"persona": "pending", "faithfulness": "pending"},
                         )
-                        actual = "allow" if safe else "reject"
-                        if safe:
+                        actual = verdict.decision.value
+                        if actual == "allow":
                             row["status"] = "human_required"
                     if trace["errors"]:
                         actual = "unknown"
                     if row["status"] != "human_required" or actual != "allow":
                         row["status"] = decision_result(case, actual)
                     row.update(actual=actual, method="real_model_and_rules")
-            except AIError:
+            except AIError as error:
+                trace["errors"].append(error.reason)
                 row.update(status="unknown", actual="unknown")
             finally:
-                row["calls"] = trace["calls"]
+                row["completion_attempts"] = trace["completion_attempts"]
+                row["http_requests"] = trace["http_requests"]
                 # Fixed error categories only, never exception payloads or provider responses.
                 row["errors"] = sorted(set(trace["errors"]))
                 results[case.id] = row
@@ -276,12 +286,18 @@ async def evaluate(
     # Cancellation is never a successful evaluation, including cases inside their finally block.
     for case, task in zip(selected, tasks, strict=True):
         if task.cancelled():
-            results[case.id] = {
-                "id": case.id,
-                "kind": case.kind,
-                "status": "not_evaluated",
-                "reason": "total_timeout",
-            }
+            row = results.setdefault(
+                case.id,
+                {
+                    "id": case.id,
+                    "kind": case.kind,
+                    "expected": case.expected,
+                    "completion_attempts": 0,
+                    "http_requests": 0,
+                    "errors": [],
+                },
+            )
+            row.update(status="not_evaluated", reason="total_timeout")
     ordered = [results[case.id] for case in selected]
     counts = {
         key: sum(row["status"] == key for row in ordered)
@@ -312,7 +328,8 @@ async def evaluate(
         "total_cases": len(cases),
         "selected_cases": len(selected),
         "excluded_cases": len(cases) - len(selected),
-        "model_calls": budget.calls,
+        "completion_attempts": budget.attempts,
+        "http_requests": budget.http_requests,
         "timed_out": timed_out,
         "counts": counts,
         "results": ordered,

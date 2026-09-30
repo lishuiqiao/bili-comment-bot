@@ -116,21 +116,21 @@ class SafetyService:
                 return SafetyVerdict(decision=Decision.REJECT, reason=reason)
         return await self._assess("source_safety", {"video_evidence": evidence_data(evidence)})
 
-    async def check_output(
+    async def assess_output(
         self,
         value: str,
         *,
         purpose: str = "companion",
         evidence: VideoEvidence | None = None,
         message: str = "",
-    ) -> bool:
+    ) -> SafetyVerdict:
         if (
             not value.strip()
             or len(value) > self.settings.limits.max_reply_chars
             or "@" in normalize(value)
             or rule_rejection(value, self.settings)
         ):
-            return False
+            return SafetyVerdict(decision=Decision.REJECT, reason="output_rule_rejected")
         try:
             result = await self.client.complete(
                 system_prompt("output_safety", self.settings.persona),
@@ -143,5 +143,23 @@ class SafetyService:
                 OutputAssessment,
             )
         except AIError:
-            return False
-        return result.safe and result.category == "allowed"
+            return SafetyVerdict(decision=Decision.UNKNOWN, reason="check_failed")
+        if result.category == "unknown":
+            return SafetyVerdict(decision=Decision.UNKNOWN, reason="unknown")
+        if result.safe and result.category == "allowed":
+            return SafetyVerdict(decision=Decision.ALLOW, reason="allowed")
+        if not result.safe and result.category != "allowed":
+            return SafetyVerdict(decision=Decision.REJECT, reason=result.category)
+        return SafetyVerdict(decision=Decision.UNKNOWN, reason="inconsistent_assessment")
+
+    async def check_output(
+        self,
+        value: str,
+        *,
+        purpose: str = "companion",
+        evidence: VideoEvidence | None = None,
+        message: str = "",
+    ) -> bool:
+        return (
+            await self.assess_output(value, purpose=purpose, evidence=evidence, message=message)
+        ).decision == Decision.ALLOW

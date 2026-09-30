@@ -23,5 +23,5 @@ with tempfile.TemporaryDirectory(prefix="bili-bot-wheel-") as folder:
         [*base, "evaluate"], cwd=folder, check=True, capture_output=True, text=True
     )
     report = json.loads(offline.stdout)
-    assert report["model_calls"] == 0 and report["counts"]["not_evaluated"] > 0
+    assert report["http_requests"] == 0 and report["counts"]["not_evaluated"] > 0
 print("Independent wheel: packaged dataset, config, demo and offline evaluation passed.")

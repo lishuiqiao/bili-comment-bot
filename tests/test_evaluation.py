@@ -7,20 +7,21 @@ import time
 
 import httpx
 import pytest
-from ai_fixtures import FixtureAI, ai_settings
+from ai_fixtures import FixtureAI, ai_settings, completion
 
 from bili_comment_bot import healthcheck
-from bili_comment_bot.ai.client import AIError
+from bili_comment_bot.ai.client import AIClient, AIError
 from bili_comment_bot.config import Settings
 from bili_comment_bot.evaluation import EvalCase, evaluate, load_cases, supplied_evidence
 from bili_comment_bot.observability import write_private
+from bili_comment_bot.safety import SafetyService
 
 
 async def test_offline_has_no_model_config_calls_or_data_directory_access(tmp_path):
     settings = Settings(data_dir=tmp_path / "must-not-exist")
     report = await evaluate(settings)
     assert report["mode"] == "offline" and report["model"] is None
-    assert report["model_calls"] == 0 and not settings.data_dir.exists()
+    assert report["http_requests"] == 0 and not settings.data_dir.exists()
     assert report["counts"]["pass"] > 0
     assert report["counts"]["not_evaluated"] > 0
     assert not report["release_approved"]
@@ -44,7 +45,7 @@ async def test_real_harness_has_video_context_mismatch_counts_and_all_persona_pa
     assert not settings.data_dir.exists()
     assert report["counts"]["false_allow"] > 0  # Prewritten fixture is no safety oracle.
     assert report["counts"]["human_required"] == 7
-    assert report["model_calls"] == len(fixture.calls)
+    assert report["http_requests"] == len(fixture.calls)
     assert "fixture-key" not in json.dumps(report)
     generated = [row for row in report["results"] if row["status"] == "human_required"]
     assert {row["purpose"] for row in generated} == {
@@ -72,7 +73,7 @@ async def test_real_budget_bounds_actual_requests_even_with_configured_retries()
     report = await evaluate(
         settings, mode="real", max_calls=2, concurrency=8, transport=httpx.MockTransport(fixture)
     )
-    assert report["model_calls"] == len(fixture.calls) == 2
+    assert report["http_requests"] == len(fixture.calls) == 2
     assert report["counts"]["unknown"] > 0
     assert any("evaluation_call_budget" in row.get("errors", []) for row in report["results"])
 
@@ -102,6 +103,114 @@ async def test_timeout_and_safety_errors_never_count_as_pass_and_cancel_requests
     output = next(row for row in report["results"] if row["id"] == "output-safe")
     assert output["status"] == "unknown"
     assert report["counts"]["human_required"] == 0
+
+
+@pytest.mark.parametrize(
+    "safe,category", [(False, "unknown"), (True, "unknown"), (False, "allowed"), (True, "harmful")]
+)
+async def test_unknown_and_inconsistent_output_verdicts_never_pass_or_approve_generation(
+    safe, category
+):
+    fixture = FixtureAI()
+
+    def handler(request):
+        payload = json.loads(request.content)
+        if "purpose=output_safety" in payload["messages"][0]["content"]:
+            return completion({"safe": safe, "category": category})
+        return fixture(request)
+
+    report = await evaluate(ai_settings(), mode="real", transport=httpx.MockTransport(handler))
+    # Both expected=allow and expected=reject must preserve unknown, not classify it as reject.
+    for key in ["output-safe", "output-false-fact"]:
+        row = next(row for row in report["results"] if row["id"] == key)
+        assert row["status"] == row["actual"] == "unknown"
+    assert report["counts"]["human_required"] == 0
+    assert all(row["status"] == "unknown" for row in report["results"] if row["kind"] == "generate")
+    client = AIClient(ai_settings(), httpx.MockTransport(handler))
+    try:
+        assert not await SafetyService(ai_settings(), client).check_output("今天慢慢聊吧")
+    finally:
+        await client.close()
+
+
+async def test_timeout_preserves_started_trace_and_zero_trace_for_waiting_case():
+    cancelled = asyncio.Event()
+
+    async def blocked(request):
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    report = await evaluate(
+        ai_settings(),
+        mode="real",
+        max_cases=2,
+        concurrency=1,
+        time_budget=0.1,
+        transport=httpx.MockTransport(blocked),
+    )
+    assert report["timed_out"] and cancelled.is_set()
+    started, waiting = report["results"]
+    assert started["completion_attempts"] == started["http_requests"] == 1
+    assert waiting["completion_attempts"] == waiting["http_requests"] == 0
+    assert report["completion_attempts"] == report["http_requests"] == 1
+    assert all(
+        row["status"] == "not_evaluated" and row["errors"] == [] for row in report["results"]
+    )
+    assert sum(row["completion_attempts"] for row in report["results"]) == 1
+    assert sum(row["http_requests"] for row in report["results"]) == 1
+
+
+@pytest.mark.parametrize("failure", ["input_budget", "request_rate"])
+async def test_pre_http_rejection_separates_completion_attempts_from_http_requests(failure):
+    overrides = (
+        {"max_input_chars": 1000} if failure == "input_budget" else {"max_calls_per_minute": 1}
+    )
+    fixture = FixtureAI()
+    report = await evaluate(
+        ai_settings(ai=overrides), mode="real", max_cases=2, transport=httpx.MockTransport(fixture)
+    )
+    assert report["completion_attempts"] == 2
+    assert report["http_requests"] == len(fixture.calls) == (0 if failure == "input_budget" else 1)
+    assert report["counts"]["unknown"] > 0
+    for field in ["completion_attempts", "http_requests"]:
+        assert sum(row[field] for row in report["results"]) == report[field]
+
+
+def test_eval_cli_unknown_is_nonzero_without_platform_access(tmp_path, monkeypatch, capsys):
+    from bili_comment_bot import __main__, evaluation
+
+    config = tmp_path / "config.toml"
+    config.write_text('[ai]\nmodel="fixture-model"\nbase_url="https://model.example/v1"\n')
+    monkeypatch.setenv("BILI_BOT_AI_API_KEY", "fixture-key")
+    fixture = FixtureAI()
+    fixture.input_decision = "unknown"
+    monkeypatch.setattr(
+        evaluation,
+        "AIClient",
+        lambda settings, transport=None: AIClient(settings, httpx.MockTransport(fixture)),
+    )
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "bili-comment-bot",
+            "--config",
+            str(config),
+            "evaluate",
+            "--eval-mode",
+            "real",
+            "--max-cases",
+            "1",
+        ],
+    )
+    with pytest.raises(SystemExit) as failed:
+        __main__.main()
+    assert failed.value.code == 1
+    report = json.loads(capsys.readouterr().out)
+    assert report["counts"]["unknown"] == 1
+    assert report["completion_attempts"] == report["http_requests"] == 1
 
 
 @pytest.mark.parametrize(

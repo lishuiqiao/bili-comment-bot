@@ -7,7 +7,9 @@ uv run --locked bili-comment-bot --config config.example.toml evaluate > offline
 uv run --locked bili-comment-bot evaluate --eval-mode real --max-cases 100 --max-calls 60 --eval-concurrency 1 --eval-timeout 300 > model-report.json
 ```
 
-真实模式需要供应商地址、模型与 `BILI_BOT_AI_API_KEY`，可能计费。当前数据集 26 条，默认最多 60 次模型请求、1 并发、300 秒；参数上限为 100 条/200 请求/8 并发/1800 秒。禁用模型重试，每个预算调用最多一个 HTTP 请求。总时限取消未完成任务，规则/引用检查不消耗模型预算。
+真实模式需要供应商地址、模型与 `BILI_BOT_AI_API_KEY`，可能计费。当前数据集 26 条，默认最多 60 次 completion 尝试、1 并发、300 秒；参数上限为 100 条/200 次尝试/8 并发/1800 秒。禁用模型重试，每个预算尝试最多一个 HTTP 请求。已开始的尝试即使被取消也不返还预算。总时限取消未完成任务，规则/引用检查不消耗模型预算。
+
+全局和逐案例分别记录 `completion_attempts`（消耗预算的完成调用尝试）与 `http_requests`（HTTP 发送前事件计数，表示请求尝试而非成功响应）。输入校验或本地限频可能在 HTTP 前拒绝，因此前者可多于后者。总超时保留已开始案例的计数及脱敏错误；等待并发槽、尚未开始的案例明确记录零次。每个字段可与逐案例总和对账，不计真实供应商账单金额。
 
 唯一规范数据集在 `src/bili_comment_bot/eval_data/evaluation-v1.jsonl`，随 wheel 打包。报告包含版本/SHA256、提示/策略/证据版本、模型、人格、预算、调用与逐条结果。视频资料也是自写合成证据，不证明真实媒体或识别率。`evals/safety-v1.jsonl` 为独立规则回归集。
 

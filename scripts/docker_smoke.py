@@ -39,7 +39,7 @@ try:
     ]
     run(*base, IMAGE, "config-check")
     assert json.loads(run(*base, IMAGE, "demo"))["platform_write_calls"] == 0
-    assert json.loads(run(*base, IMAGE, "evaluate"))["model_calls"] == 0
+    assert json.loads(run(*base, IMAGE, "evaluate"))["http_requests"] == 0
     # No credentials and no networking: fail closed, without publishing or hidden fallback.
     run(
         *base,
