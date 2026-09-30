@@ -124,6 +124,12 @@ class PublishReceipt(Contract):
     remote_id: str | None = Field(default=None, min_length=1)
 
 
+class LikeStateEvidence(Contract):
+    account_uid: int = Field(gt=0, strict=True)
+    aid: int = Field(gt=0, strict=True)
+    liked: bool = Field(strict=True)
+
+
 class DefinitelyNotSent(Exception):
     """Adapter has proof no platform write succeeded; quota may be released."""
 

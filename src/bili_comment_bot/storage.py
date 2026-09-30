@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import re
 import time
 from collections.abc import Callable, Collection, Iterable
 from contextlib import asynccontextmanager
@@ -10,7 +11,14 @@ from pathlib import Path
 
 import aiosqlite
 
-from .domain import ActionKind, ActionStatus, Channel, MessageEvent, PublishAction
+from .domain import (
+    ActionKind,
+    ActionStatus,
+    Channel,
+    LikeStateEvidence,
+    MessageEvent,
+    PublishAction,
+)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_version(version INTEGER PRIMARY KEY);
@@ -343,25 +351,72 @@ class Store:
                 "UPDATE inbox SET status='pending' WHERE ns=? AND status='processing'", (self.ns,)
             )
 
-    async def resolve_uncertain(self, action_id: str, remote_id: str, evidence: str):
-        """Operator supplies verified remote receipt; this API never blindly resends."""
-        if not remote_id.strip() or not evidence.strip():
-            raise ValueError("a verified receipt and audit explanation are required")
+    async def resolve_uncertain(
+        self,
+        action_id: str,
+        remote_id: str | None,
+        evidence: str,
+        *,
+        like_state: LikeStateEvidence | None = None,
+    ):
+        """Explicit operator verification, by stored action kind. Never sends a request."""
+        if not evidence.strip() or len(evidence) > 1000:
+            raise ValueError("a bounded audit explanation is required")
         async with self.transaction() as db:
+            row = await (
+                await db.execute(
+                    "SELECT payload,status FROM actions WHERE ns=? AND id=?", (self.ns, action_id)
+                )
+            ).fetchone()
+            if not row or row[1] != ActionStatus.UNCERTAIN:
+                raise ValueError("action is not uncertain")
+            action = PublishAction.model_validate_json(row[0])
+            if action.kind == ActionKind.LIKE:
+                account = await (
+                    await db.execute("SELECT value FROM metadata WHERE key='account_uid'")
+                ).fetchone()
+                if (
+                    remote_id is not None
+                    or not isinstance(like_state, LikeStateEvidence)
+                    or not like_state.liked
+                    or action.aid != like_state.aid
+                    or not account
+                    or account[0] != str(like_state.account_uid)
+                ):
+                    raise ValueError(
+                        "like evidence must match bound account and target liked state"
+                    )
+                reason = json.dumps(
+                    {
+                        "verification": "manual_target_state_check",
+                        **like_state.model_dump(),
+                        "note": evidence.strip(),
+                    },
+                    ensure_ascii=False,
+                )
+            else:
+                if (
+                    like_state is not None
+                    or not isinstance(remote_id, str)
+                    or not re.fullmatch(r"[1-9][0-9]{0,31}", remote_id)
+                ):
+                    raise ValueError("comment/DM recovery requires a verified numeric remote ID")
+                reason = evidence.strip()
+            now = self.clock()
             result = await db.execute(
                 "UPDATE actions SET status='succeeded',remote_id=?,reason=?,updated=? "
                 "WHERE ns=? AND id=? AND status='uncertain'",
-                (remote_id, evidence, self.clock(), self.ns, action_id),
+                (remote_id, reason, now, self.ns, action_id),
             )
             if result.rowcount != 1:
                 raise ValueError("action is not uncertain")
             await db.execute(
                 "UPDATE quota SET state='sent',sent_at=? WHERE ns=? AND action_id=?",
-                (self.clock(), self.ns, action_id),
+                (now, self.ns, action_id),
             )
             await db.execute(
                 "INSERT INTO audit(ns,action_id,state,reason,created) VALUES(?,?,?,?,?)",
-                (self.ns, action_id, "succeeded", evidence, self.clock()),
+                (self.ns, action_id, "succeeded", reason, now),
             )
 
     async def cache_get(self, key: str) -> dict | None:

@@ -14,6 +14,7 @@ from bili_comment_bot.domain import (
     Decision,
     DefinitelyNotSent,
     FollowState,
+    LikeStateEvidence,
     Mention,
     MessageEvent,
     PublishAction,
@@ -339,6 +340,7 @@ def discovery_actions():
 
 @pytest.mark.parametrize("failed_step", [0, 1, 2])
 async def test_high_score_stops_at_each_uncertain_step(failed_step, store, live_settings):
+    await store.bind_account(42)
     actions = discovery_actions()
     platform = FakePlatform({actions[failed_step].id: TimeoutError()})
     dispatcher = Dispatcher(live_settings, store, platform)
@@ -351,7 +353,16 @@ async def test_high_score_stops_at_each_uncertain_step(failed_step, store, live_
     assert len(platform.calls) == failed_step + 1
     with pytest.raises(ValueError):
         await store.resolve_uncertain(actions[failed_step].id, "", "")
-    await store.resolve_uncertain(actions[failed_step].id, "verified-remote-id", "平台记录已核对")
+    if failed_step == 0:
+        await store.resolve_uncertain(
+            actions[0].id,
+            None,
+            "核对目标状态：此账号已点赞，不断言原超时请求成功",
+            like_state=LikeStateEvidence(account_uid=42, aid=1, liked=True),
+        )
+        assert (await store.action(actions[0].id))["remote_id"] is None
+    else:
+        await store.resolve_uncertain(actions[failed_step].id, "900001", "平台记录已核对")
     for action in actions:
         await dispatcher.execute(action)
     assert [a.kind for a in platform.calls] == [a.kind for a in actions]
@@ -642,7 +653,13 @@ async def test_dependency_waits_without_quota_then_claims_after_proof(
         assert status == ActionStatus.UNCERTAIN
         assert await dispatcher.execute(item) == ActionStatus.PENDING
         assert not await quota_rows(store)
-        await store.resolve_uncertain(parent.id, "verified-like", "remote record confirmed")
+        await store.bind_account(42)
+        await store.resolve_uncertain(
+            parent.id,
+            None,
+            "verified target is liked",
+            like_state=LikeStateEvidence(account_uid=42, aid=1, liked=True),
+        )
     assert await dispatcher.execute(item) == ActionStatus.SUCCEEDED
     assert len(await quota_rows(store)) == 1
     assert [action.id for action in platform.calls] == [parent.id, item.id]
@@ -662,3 +679,86 @@ async def test_quota_uses_persisted_recipient_and_channel(store):
     assert (await store.claim_action("reply:1", dm_limit=0, comment_limit=1)).claimed
     row = (await quota_rows(store))[0]
     assert (row["uid"], row["channel"]) == (22, Channel.COMMENT)
+
+
+@pytest.mark.parametrize(
+    "proof,remote_id,note",
+    [
+        (LikeStateEvidence(account_uid=43, aid=1, liked=True), None, "verified"),
+        (LikeStateEvidence(account_uid=42, aid=2, liked=True), None, "verified"),
+        (LikeStateEvidence(account_uid=42, aid=1, liked=False), None, "verified"),
+        (LikeStateEvidence(account_uid=42, aid=1, liked=True), None, " "),
+        (LikeStateEvidence(account_uid=42, aid=1, liked=True), "999", "verified"),
+        (None, None, "verified"),
+    ],
+)
+async def test_like_recovery_rejects_mismatched_or_unconfirmed_proof(
+    proof, remote_id, note, store, live_settings
+):
+    await store.bind_account(42)
+    item = discovery_actions()[0]
+    platform = FakePlatform({item.id: TimeoutError()})
+    dispatcher = Dispatcher(live_settings, store, platform)
+    assert await dispatcher.execute(item) == ActionStatus.UNCERTAIN
+    async with store.transaction() as db:
+        before = (await (await db.execute("SELECT COUNT(*) FROM audit")).fetchone())[0]
+    with pytest.raises(ValueError):
+        await store.resolve_uncertain(item.id, remote_id, note, like_state=proof)
+    assert (await store.action(item.id))["status"] == ActionStatus.UNCERTAIN
+    async with store.transaction() as db:
+        assert (await (await db.execute("SELECT COUNT(*) FROM audit")).fetchone())[0] == before
+    assert len(platform.calls) == 1
+
+
+async def test_like_recovery_keeps_null_id_and_atomic_state_audit(store, live_settings):
+    import json
+
+    await store.bind_account(42)
+    item = discovery_actions()[0]
+    dispatcher = Dispatcher(live_settings, store, FakePlatform({item.id: TimeoutError()}))
+    assert await dispatcher.execute(item) == ActionStatus.UNCERTAIN
+    proof = LikeStateEvidence(account_uid=42, aid=1, liked=True)
+    await store.resolve_uncertain(item.id, None, "核对已点赞目标状态", like_state=proof)
+    row = await store.action(item.id)
+    assert row["status"] == ActionStatus.SUCCEEDED and row["remote_id"] is None
+    async with store.transaction() as db:
+        audit = await (await db.execute("SELECT * FROM audit ORDER BY seq DESC LIMIT 1")).fetchone()
+    detail = json.loads(audit["reason"])
+    assert detail["verification"] == "manual_target_state_check"
+    assert (detail["account_uid"], detail["aid"], detail["liked"]) == (42, 1, True)
+    assert audit["reason"] == row["reason"]
+    with pytest.raises(ValueError):
+        await store.resolve_uncertain(item.id, None, "again", like_state=proof)
+
+
+@pytest.mark.parametrize("remote_id", [None, "", " ", "0", "fake-id", "-1", True])
+@pytest.mark.parametrize("channel", list(Channel))
+async def test_comment_and_dm_recovery_require_valid_remote_id(
+    remote_id, channel, store, live_settings
+):
+    item = reply(channel=channel)
+    platform = FakePlatform({item.id: TimeoutError()})
+    assert await Dispatcher(live_settings, store, platform).execute(item) == ActionStatus.UNCERTAIN
+    with pytest.raises(ValueError):
+        await store.resolve_uncertain(item.id, remote_id, "checked")
+    assert (await store.action(item.id))["status"] == ActionStatus.UNCERTAIN
+    await store.resolve_uncertain(item.id, "900002", "verified actual resource")
+    assert (await store.action(item.id))["remote_id"] == "900002"
+    assert (await quota_rows(store))[0]["state"] == "sent"
+
+
+async def test_unbound_account_cannot_verify_uncertain_like(store, live_settings):
+    item = discovery_actions()[0]
+    assert (
+        await Dispatcher(live_settings, store, FakePlatform({item.id: TimeoutError()})).execute(
+            item
+        )
+        == ActionStatus.UNCERTAIN
+    )
+    with pytest.raises(ValueError):
+        await store.resolve_uncertain(
+            item.id,
+            None,
+            "checked",
+            like_state=LikeStateEvidence(account_uid=42, aid=1, liked=True),
+        )

@@ -8,6 +8,7 @@ from pathlib import Path
 from .config import Settings, load_settings
 from .dispatch import Dispatcher
 from .domain import ActionKind, Decision, Mention, PublishAction, VideoScore
+from .instance_lock import InstanceInUse, InstanceLock
 from .policy import discovery_steps
 from .storage import Store
 
@@ -57,6 +58,12 @@ async def demo():
 
 
 async def auth_command(settings: Settings, command: str):
+    with InstanceLock(settings.data_dir) as lock:
+        normalized = settings.model_copy(update={"data_dir": lock.directory})
+        await _auth_command_locked(normalized, command)
+
+
+async def _auth_command_locked(settings: Settings, command: str):
     from .adapters.bilibili.auth import AuthManager, QRStatus
     from .adapters.bilibili.auth_state import CredentialFile
     from .adapters.bilibili.client import BilibiliClient
@@ -150,6 +157,8 @@ def main():
 
         try:
             asyncio.run(auth_command(settings, args.command))
+        except InstanceInUse:
+            parser.exit(2, "此数据目录正在使用；请先停止占用它的登录命令或 bot 服务。\n")
         except ReauthenticationRequired:
             parser.exit(2, "续期请求结果无法确定，已暂停发布；请重新运行 login 扫码。\n")
         except IdentityMismatch:
