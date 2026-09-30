@@ -1017,3 +1017,31 @@ def test_status_missing_check_nonzero_and_generic_error_not_called_login(
     with pytest.raises(SystemExit) as error:
         main()
     assert error.value.code != 0 and "登录操作" not in capsys.readouterr().err
+
+
+async def test_action_backoff_cannot_be_bypassed_by_workflow_or_direct_atomic_claim(tmp_path):
+    from bili_comment_bot.domain import Mention
+
+    async with business(tmp_path) as (service, store, fixture, server, _, now):
+        await store.put_workflow("discovery:1", flow_payload(1))
+        action = PublishAction(
+            id="discovery:1:invite",
+            kind=ActionKind.INVITE,
+            aid=1,
+            text="这段日常很有趣",
+            mentions=[Mention(uid=123, name="朋友")],
+            input_decision=Decision.ALLOW,
+            output_safe=True,
+            evidence_usable=True,
+        )
+        await store.put_actions([action])
+        await store.defer_work("action:" + action.id)
+        assert not (await store.claim_action(action.id)).claimed
+        assert await service.dispatcher.execute(action) == ActionStatus.PENDING
+        assert await store.due_workflows(1) == []
+        assert not fixture.calls and not server.posts
+        now[0] += 30
+        assert await store.due_workflows(1) == [1]
+        assert await service.discover_video(1) == [ActionStatus.SUCCEEDED]
+        assert len(server.posts) == 1 and not fixture.calls
+        assert (await store.counts())["work_retries"] == 0

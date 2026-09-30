@@ -70,6 +70,8 @@ class Dispatcher:
         action = PublishAction.model_validate_json(row["payload"])
         if row["status"] != ActionStatus.PENDING:
             return ActionStatus(row["status"])
+        if not await self.store.ready_work("action:" + action.id):
+            return ActionStatus.PENDING
         if self.settings.namespace != self.store.ns:
             return ActionStatus(row["status"])
         reason = gate(action, self.settings)

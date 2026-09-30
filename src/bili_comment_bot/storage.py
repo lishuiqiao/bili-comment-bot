@@ -376,8 +376,11 @@ class Store:
                     "AND NOT EXISTS(SELECT 1 FROM actions a WHERE a.ns=w.ns "
                     "AND a.id LIKE w.id||':%' "
                     "AND a.status IN ('uncertain','in_flight','failed','blocked')) "
+                    "AND NOT EXISTS(SELECT 1 FROM actions a JOIN work_retries ar "
+                    "ON a.ns=ar.ns AND ar.id='action:'||a.id WHERE a.ns=w.ns "
+                    "AND a.id LIKE w.id||':%' AND a.status='pending' AND ar.next_at>?) "
                     "ORDER BY COALESCE(r.next_at,0),w.id LIMIT ?",
-                    (self.ns, self.clock(), limit),
+                    (self.ns, self.clock(), self.clock(), limit),
                 )
             ).fetchall()
             return await self._validate_selection(db, rows, "discovery", decode)
@@ -501,6 +504,14 @@ class Store:
                 raise ValueError("action does not exist")
             if row[2] != ActionStatus.PENDING:
                 return ClaimResult(False, ActionStatus(row[2]), "already handled")
+            retry = await (
+                await db.execute(
+                    "SELECT next_at FROM work_retries WHERE ns=? AND id=?",
+                    (self.ns, "action:" + action_id),
+                )
+            ).fetchone()
+            if retry and retry[0] > self.clock():
+                return ClaimResult(False, ActionStatus.PENDING, "waiting for retry")
             if row[1]:
                 dependency = await (
                     await db.execute(
