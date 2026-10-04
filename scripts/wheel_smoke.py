@@ -14,6 +14,8 @@ repository = Path(sys.argv[1]).resolve()
 package = Path(bili_comment_bot.__file__).resolve()
 assert not package.is_relative_to(repository), package
 assert len(load_cases()[0]) == 26
+for asset in ("index.html", "app.js", "style.css"):
+    assert (package.parent / "web_assets" / asset).is_file(), asset
 metadata = distribution("bili-comment-bot").metadata
 assert metadata["License-Expression"] == "MIT"
 assert set(metadata.get_all("License-File")) == {"LICENSE", "THIRD_PARTY_NOTICES.md"}

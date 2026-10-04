@@ -134,6 +134,8 @@ def main():
     parser.add_argument("--config", type=Path, default=Path("config.toml"))
     parser.add_argument(
         "command",
+        nargs="?",
+        default="run",
         choices=[
             "config-check",
             "demo",
@@ -149,6 +151,9 @@ def main():
         ],
     )
     parser.add_argument("--once", action="store_true")
+    parser.add_argument("--headless", action="store_true", help="Run without the web console")
+    parser.add_argument("--web-host", default="127.0.0.1")
+    parser.add_argument("--web-port", type=int, default=8765)
     parser.add_argument("--check", action="store_true")
     parser.add_argument("--namespace", choices=["sim", "live"])
     parser.add_argument("--action-id")
@@ -167,6 +172,15 @@ def main():
     args = parser.parse_args()
     if args.command == "demo":
         asyncio.run(demo())
+        return
+    if args.command == "run" and not args.once and not args.headless:
+        from .web import serve
+
+        logging.basicConfig(level=logging.INFO, format="%(message)s")
+        try:
+            asyncio.run(serve(args.config, args.web_host, args.web_port))
+        except (OSError, ValueError, RuntimeError) as error:
+            parser.exit(2, f"控制台无法启动（{type(error).__name__}）；检查端口和目录权限。\n")
         return
     try:
         settings = load_settings(args.config)

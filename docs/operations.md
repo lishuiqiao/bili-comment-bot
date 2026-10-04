@@ -2,25 +2,23 @@
 
 ## 本地启动
 
-Python 3.11+，`uv sync --locked`。复制配置示例，设置模型名和环境密钥，填写邀请 UID/关键词；转写默认关闭，启用时需要独立兼容接口和密钥。
+Python 3.11+，执行 `uv sync --locked`，然后启动：
 
 ```sh
-cp config.example.toml config.toml
-uv run bili-comment-bot config-check
-uv run bili-comment-bot login
-uv run bili-comment-bot run --once
 uv run bili-comment-bot run
 ```
 
-扫码使用 `data/login.png`，凭据保存在私密目录。`--once` 是有限演练：一次采集/搜索，分别一个批次的事件、动作和候选/流程处理。它读取真实平台、付费模型，并维护 Cookie；默认只模拟评论/私信/点赞。收集失败仍会执行其他独立渠道，最后以非零退出报告失败。未到期 AI 重试不强行提前执行。
+打开终端输出的完整控制台链接，在网页保存模型、人格和运行配置，点击扫码登录后启动。网站随项目启动，无配置时也可访问；所有配置均在网页编辑。运行中保存会安全停止并重启机器人，网页登录会先停止机器人。网站可持续用于处理认证或模型故障。
+
+网页扫码凭据仍保存到私密数据目录。需要单轮 CLI 演练时先停止网页中的机器人，再执行 `uv run bili-comment-bot run --once`。该命令读取真实平台、模型并维护 Cookie，默认仅模拟平台写入。无网站运行使用 `run --headless`。配置路径和迁移规则见 [部署手册](deployment.md)。
 
 常驻各采集渠道一次一个任务；模型并发、批次、平台请求限频都有上限。搜索无邀请 UID 时不运行。SIGINT/SIGTERM 停止新工作，等待 `runtime.shutdown_timeout` 后取消剩余任务。在途 POST 取消记 unknown，不自动再发。停止后才能登录、更新凭据或进行状态修改；实例锁禁止同时使用一个目录。
 
-真实发布需同时 `publishing.dry_run=false` 和 `publish_enabled=true`，重启后使用 live 命名空间。sim 状态不转换成 live 回执。同一目录绑定同一账号，不同账号使用独立目录。本轮没有执行真实发布验收。
+真实发布需在网页同时设置 `publishing.dry_run=false` 和 `publish_enabled=true`，保存并重启后使用 live 命名空间。sim 状态不转换成 live 回执。同一目录绑定同一账号，不同账号使用独立目录。本轮没有执行真实发布验收。
 
 ## 登录异常
 
-失效/验证码、账号错配和不可恢复续期会立即阻止新的平台请求，保存状态并受控退出。先停止服务，再按 CLI 提示扫码；验证码由用户在 App 处理，不绕过。仅 refresh 或 confirm 已持久保存为开始但没有确定结果时，需要重新扫码；confirm_pending 可按已保存的新 Cookie/旧 token 恢复确认。
+失效/验证码、账号错配和不可恢复续期会立即阻止新的平台请求，保存状态并受控退出机器人进程，配置网站保持可用。在网站重新扫码，或先停止服务再按 CLI 提示扫码；验证码由用户在 App 处理，不绕过。仅 refresh 或 confirm 已持久保存为开始但没有确定结果时，需要重新扫码；confirm_pending 可按已保存的新 Cookie/旧 token 恢复确认。
 
 ## 状态与恢复
 

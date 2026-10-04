@@ -68,6 +68,33 @@ assert pathlib.Path('/data').stat().st_mode & 0o777 == 0o700
         "-c",
         "from pathlib import Path; assert Path('/data/probe').read_text() == 'persistent'",
     )
+    console_smoke = """import json, os, subprocess, sys, urllib.request
+from pathlib import Path
+env = dict(os.environ, BILI_BOT_WEB_CONFIG='/data/console-smoke.web.json')
+process = subprocess.Popen([sys.executable, '-m', 'bili_comment_bot', 'run'],
+    env=env, stdout=subprocess.PIPE, text=True)
+try:
+    line = process.stdout.readline()
+    token = line.split('#token=', 1)[1].strip()
+    base = 'http://127.0.0.1:8765'
+    assert 'B站评论机器人'.encode() in urllib.request.urlopen(base, timeout=5).read()
+    def api(path, payload=None):
+        req = urllib.request.Request(base + path,
+            data=json.dumps(payload).encode() if payload else None,
+            headers={'Authorization': 'Bearer ' + token, 'Content-Type': 'application/json'})
+        return json.load(urllib.request.urlopen(req, timeout=5))
+    state = api('/api/state')
+    assert state['state'] == 'stopped'
+    state['settings']['persona']['name'] = 'Container smoke'
+    result = api('/api/config', {'settings': state['settings'], 'revision': state['revision']})
+    assert result['settings']['persona']['name'] == 'Container smoke'
+    assert Path('/data/console-smoke.web.json').stat().st_mode & 0o777 == 0o600
+finally:
+    process.terminate()
+    process.wait(timeout=10)
+    Path('/data/console-smoke.web.json').unlink(missing_ok=True)
+"""
+    run(*base, "--entrypoint", "python", IMAGE, "-c", console_smoke)
     probe = "from bili_comment_bot.healthcheck import main; main()"
     run(*base, "--entrypoint", "python", IMAGE, "-c", probe, expected=1)
     for namespace in ["sim", "live"]:

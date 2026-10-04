@@ -1,6 +1,6 @@
 # 可选音频转写
 
-默认 `evidence.transcription_enabled=false`。启用时，配置独立的 `[transcription]` 地址并注入 `BILI_BOT_TRANSCRIPTION_API_KEY`；模型沿用 `evidence.transcription_model`，或由 `BILI_BOT_TRANSCRIPTION_MODEL` 覆盖。不共用聊天模型密钥，不传 B 站 Cookie。服务须支持 OpenAI 风格 multipart `/audio/transcriptions`、`verbose_json` 与 segment 时间戳；缺配置或不支持时明确失败，不自动降级成无时间信息的文本。
+默认 `evidence.transcription_enabled=false`。启用时，在网页「音频转写」填写独立的服务地址与密钥，在「字幕与证据」设置转写模型并开启转写。旧部署首次导入仍支持 `BILI_BOT_TRANSCRIPTION_API_KEY` 与 `BILI_BOT_TRANSCRIPTION_MODEL`；网页保存后以网页配置为准。不共用聊天模型密钥，不传 B 站 Cookie。服务须支持 OpenAI 风格 multipart `/audio/transcriptions`、`verbose_json` 与 segment 时间戳；缺配置或不支持时明确失败，不自动降级成无时间信息的文本。
 
 优先全部分 P 字幕，只有轨道查询成功且列表为空，才尝试音频。轨道存在但语言不在配置列表，或字幕结构/认证/权限/网络错误，不转换成“无字幕”。音轨只选择受支持的 AAC、最低带宽及经过核对的 HTTPS CDN，不获取画面或绕过访问限制。
 

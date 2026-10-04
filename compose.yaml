@@ -8,12 +8,14 @@ services:
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     stop_grace_period: 330s # 大于配置允许的最大 shutdown_timeout=300s
-    env_file: .env
     environment:
       BILI_BOT_DATA_DIR: /data
+      BILI_BOT_WEB_CONFIG: /data/settings.web.json
     volumes:
       - bot-data:/data
-      - ./config.toml:/app/config.toml:ro
+    ports:
+      - "127.0.0.1:8765:8765"
+    command: ["run", "--web-host", "0.0.0.0"]
     tmpfs:
       - /tmp:size=32m,mode=1777
 

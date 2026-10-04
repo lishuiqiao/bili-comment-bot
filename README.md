@@ -1,7 +1,7 @@
 <div align="center">
-  <img src="assets/banner.svg" alt="bili-comment-bot — Videos, with a little personality." width="100%">
+  <img src="assets/banner.svg" alt="B站评论机器人 — Videos, with a little personality." width="100%">
 
-  <h1>bili-comment-bot</h1>
+  <h1>B站评论机器人</h1>
   <p><strong>看懂视频，也接住你的日常。</strong></p>
   <p>一个有性格、会总结、能发现有趣视频的 B 站陪伴机器人。</p>
 
@@ -40,57 +40,33 @@
 
 ## 快速开始
 
-需要 **Docker Engine + Compose v2**。克隆仓库后，在项目根目录操作。
-
-**1 · 准备配置与模型**
+需要 **Docker Engine + Compose v2**。克隆后直接启动，无需先创建配置文件：
 
 ```sh
-cp config.example.toml config.toml
-cp .env.example .env
-chmod 600 .env config.toml
+docker compose up -d --build bot
+docker compose logs --tail 30 bot
 ```
 
-在 `.env` 填写 `BILI_BOT_AI_API_KEY` 与 `BILI_BOT_AI_MODEL`；使用其他兼容供应商时修改 `BILI_BOT_AI_BASE_URL`。在 `config.toml` 设置人格、搜索关键词、邀请用户数字 UID 与额度。完整示例见 [config.example.toml](config.example.toml)。
+打开日志中的完整 **配置控制台链接**（默认 `http://127.0.0.1:8765/`，链接包含访问令牌）。在网站中：
 
-```sh
-docker compose build
-docker compose run --rm bot config-check
-```
+1. 在「模型与连接」填写服务地址、模型名称与 API 密钥，保存配置。
+2. 点击「扫码登录」，直接用哔哩哔哩 App 扫描网页二维码并确认。
+3. 调整人格、额度、视频发现等配置，然后点击「启动」。
 
-**2 · 扫码登录**
-
-```sh
-docker compose run --rm --name bili-bot-login bot login
-```
-
-出现等待扫码提示后，在另一终端复制二维码并打开图片：
-
-```sh
-docker cp bili-bot-login:/data/login.png ./login.png
-```
-
-用哔哩哔哩手机 App 扫码并确认。登录成功后删除宿主机的 `login.png`；凭据保存在私密持久卷中。
-
-**3 · 演练并启动**
-
-```sh
-docker compose run --rm bot run --once
-docker compose up -d bot
-docker compose logs --tail 100 bot
-```
+配置网站随项目常驻启动；模型和账号就绪后，后续启动项目会自动启动机器人。认证或模型故障会停止机器人，网站继续提供配置和重新登录入口。所有运行配置均可在网站编辑，运行中保存会先安全停止旧进程，再以新配置启动。
 
 > [!IMPORTANT]
-> 默认 `dry_run=true`、`publish_enabled=false`，评论、私信和点赞均为模拟。采集、模型调用与 Cookie 续期仍真实联网，模型可能计费。完成验收后，将两个开关同时改为 `dry_run=false`、`publish_enabled=true`，再重启服务启用真实发布。
+> 默认模拟演练，不发送评论、私信和点赞；采集、模型调用与 Cookie 续期仍会真实联网，模型可能计费。完成验收后，在「发布控制」关闭模拟并开启真实发布。网站保存的配置和密钥以 0600 权限存入私密持久卷，请勿公开控制台链接或配置备份。
 
-详细部署、停止、备份与认证故障处理见 [Docker 部署](docs/deployment.md)。一个账号与数据目录只运行一个实例。
+原有 TOML 和环境变量仍可用于首次导入；网站第一次保存后，以网页配置为准。详细迁移、远程访问和备份见 [Docker 部署](docs/deployment.md)。
 
 ## 给机器人一点性格
 
-下面是 `config.toml` 中的配置片段；各情感值范围为 `0–1`。
+在网站「人格与表达」「额度与边界」「视频发现」中调整；各情感值范围为 `0–1`。以下 TOML 仅供旧配置迁移参考：
 
 ```toml
 [persona]
-name = "bili-comment-bot"
+name = "B站评论机器人"
 personality = "温柔、真诚，有一点俏皮的日常陪伴者"
 warmth = 0.8
 humor = 0.5
@@ -130,6 +106,8 @@ invite_uids = [] # 填写希望邀请的用户数字 UID
 
 ```sh
 uv sync --locked
+uv run --locked bili-comment-bot run
+# 终端会输出本地控制台链接；Ctrl+C 同时停止网站与机器人
 uv run --locked bili-comment-bot --config config.example.toml config-check
 uv run --locked bili-comment-bot demo
 uv run --locked pytest -q
@@ -137,7 +115,7 @@ uv run --locked bili-comment-bot --config config.example.toml evaluate
 python3 scripts/check_public_tree.py
 ```
 
-`demo` 与默认离线 `evaluate` 不调用 B 站或模型服务。原生 CLI 不自动加载 `.env`，运行时需要通过环境变量注入密钥。代码规范、接口测试与贡献流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+`demo` 与默认离线 `evaluate` 不调用 B 站或模型服务。原生 CLI 不自动加载 `.env`；可直接在网站保存密钥。`run --headless` 保留无网站运行方式，`run --once` 保留单轮演练。代码规范、接口测试与贡献流程见 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## 文档导航
 

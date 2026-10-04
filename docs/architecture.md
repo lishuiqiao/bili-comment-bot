@@ -71,3 +71,9 @@ BusinessService 原子认领事件，读取数据库原始 payload；事件完�
 退出先停止新工作、等待有限在途任务，再取消；Dispatcher 将被取消的在途发布保存为 uncertain。共享证据任务、HTTP、数据库、目录锁依次关闭。不能通过修改 publishing/namespace 暂停认证故障；下次 login 在服务退出后取得同一锁。
 
 schema 5 增加 discovery_jobs 到期候选与 workflow_states；迁移保留旧流程。候选低分/证据不足延后一个 discovery.interval，成功推荐终身去重。未完成流程独立于后续搜索；依赖 uncertain/failed/blocked 时暂停，人工核实为成功后可枚举继续。可发布动作枚举排除未成功依赖，避免前列积压饿死其他动作。
+
+## 网页配置控制台
+
+`run` 默认启动本机 HTTP 控制台；`run --once` 和 `run --headless` 保留独立运行器。控制台作为父进程，独占配置路径对应的控制台锁，通过受认证的 API 提供完整 Settings schema、脱敏配置、状态、扫码和启停。静态资源随 wheel 打包，不依赖 CDN 或前端构建工具。
+
+控制台先校验候选配置，再停止旧子进程，使用原子替换和 0600 权限保存完整 JSON，最后启动新子进程。不得原地修改活跃 Dispatcher 的设置。机器人与 login 子进程继续取得原数据目录锁，控制台在异常后保持可用，但不自动重试平台操作。状态接口不回显模型密钥，二维码只在当前扫码任务中可读取。Host/Origin 校验和随机 Bearer 令牌保护所有 API，默认仅回环访问。

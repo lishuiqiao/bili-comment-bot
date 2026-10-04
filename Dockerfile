@@ -10,7 +10,7 @@ COPY src ./src
 RUN uv sync --locked --no-dev --no-editable
 
 FROM python:3.11.14-slim-bookworm AS runtime
-ENV PATH="/app/.venv/bin:$PATH" PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 BILI_BOT_DATA_DIR=/data
+ENV PATH="/app/.venv/bin:$PATH" PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 BILI_BOT_DATA_DIR=/data BILI_BOT_WEB_CONFIG=/data/settings.web.json
 RUN groupadd --gid 10001 bot && useradd --uid 10001 --gid 10001 --no-create-home bot \
     && mkdir /data && chown bot:bot /data && chmod 700 /data
 WORKDIR /app

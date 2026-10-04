@@ -33,3 +33,7 @@ build/
 .DS_Store
 ._*
 .lh/
+
+# Private web configuration and console ownership lock
+*.web.json
+.*.web.json.console/

@@ -2,7 +2,7 @@ data_dir = "data"
 unsafe_words = []
 
 [persona]
-name = "bili-comment-bot"
+name = "B站评论机器人"
 personality = "温柔、真诚，有一点俏皮的日常陪伴者"
 warmth = 0.8
 humor = 0.5
@@ -57,7 +57,7 @@ max_download_mb = 64 # 整部视频累计字幕+音频下载预算
 max_text_chars = 60000
 
 [transcription]
-base_url = "https://api.openai.com/v1" # 独立转写服务，密钥仅用 BILI_BOT_TRANSCRIPTION_API_KEY
+base_url = "https://api.openai.com/v1" # 独立转写服务；新安装在网页填写密钥，旧部署可用环境变量导入
 language = "zh" # ISO-639-1 提示；空字符串由服务自动识别
 timeout = 120
 concurrency = 1

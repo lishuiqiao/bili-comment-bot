@@ -28,6 +28,8 @@ def private_path(name: str) -> bool:
         or path.name in PRIVATE_NAMES
         or (path.name.startswith(".env") and name != ".env.example")
         or path.suffix in PRIVATE_SUFFIXES
+        or path.name.endswith(".web.json")
+        or any(part.endswith(".web.json.console") for part in path.parts)
         or path.name.endswith(".local.toml")
         or path.name.endswith("-report.json")
         or bool(re.fullmatch(r".*(?:cookie|credential).*\.json", path.name, re.IGNORECASE))

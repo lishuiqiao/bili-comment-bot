@@ -1,5 +1,6 @@
-"""Validated deployment configuration; credentials never live in TOML."""
+"""Validated settings with legacy TOML import and private web-managed overrides."""
 
+import json
 import os
 import tomllib
 from pathlib import Path
@@ -14,7 +15,7 @@ class ConfigModel(BaseModel):
 
 
 class Persona(ConfigModel):
-    name: str = Field(default="bili-comment-bot", min_length=1, max_length=30)
+    name: str = Field(default="B站评论机器人", min_length=1, max_length=30)
     personality: str = Field(default="温柔、真诚，有一点俏皮的日常陪伴者", max_length=1000)
     warmth: float = Field(default=0.8, ge=0, le=1, allow_inf_nan=False)
     humor: float = Field(default=0.5, ge=0, le=1, allow_inf_nan=False)
@@ -174,8 +175,14 @@ class Settings(ConfigModel):
 
 
 def load_settings(path: Path) -> Settings:
-    with path.open("rb") as file:
-        raw = tomllib.load(file)
+    saved = web_config_path(path)
+    if saved.exists():
+        with saved.open() as file:
+            return Settings.model_validate(json.load(file))
+    raw = {}
+    if path.exists():
+        with path.open("rb") as file:
+            raw = tomllib.load(file)
     ai = raw.setdefault("ai", {})
     for env, key in (
         ("BILI_BOT_AI_BASE_URL", "base_url"),
@@ -199,3 +206,8 @@ def load_settings(path: Path) -> Settings:
             "BILI_BOT_TRANSCRIPTION_MODEL"
         ]
     return Settings.model_validate(raw)
+
+
+def web_config_path(path: Path) -> Path:
+    """Stable bootstrap location, independent of the editable data directory."""
+    return Path(os.environ.get("BILI_BOT_WEB_CONFIG", str(path.with_suffix(".web.json"))))
