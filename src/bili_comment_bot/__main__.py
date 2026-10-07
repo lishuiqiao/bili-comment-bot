@@ -138,6 +138,7 @@ def main():
         default="run",
         choices=[
             "config-check",
+            "prepare-local-models",
             "demo",
             "run",
             "login",
@@ -191,6 +192,14 @@ def main():
         )
     if args.command == "config-check":
         print(f"Configuration valid; mode={settings.namespace}; bot={settings.persona.name}")
+    elif args.command == "prepare-local-models":
+        from .ai.local import prepare_models
+
+        try:
+            prepare_models(settings)
+        except Exception as error:
+            parser.exit(2, f"本地模型准备失败（{type(error).__name__}）；检查 local 依赖和网络。\n")
+        print("本地模型已准备；推理时仅使用本机缓存。")
     elif args.command == "evaluate":
         from .ai.client import AIError
         from .evaluation import evaluate

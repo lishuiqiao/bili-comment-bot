@@ -120,10 +120,19 @@ class Console:
     async def _start(self, command="run"):
         if self.process and self.process.returncode is None:
             raise ConsoleError("请先停止当前任务。")
-        if command == "run" and (
-            not self.settings.ai.model or not self.settings.ai.api_key.get_secret_value()
-        ):
-            raise ConsoleError("请先填写模型名称和 API 密钥。")
+        if command == "run" and (not self.settings.ai_ready):
+            raise ConsoleError("请选择本地模型，或填写 API 模型名称和密钥。")
+        if command == "run":
+            from .ai.client import AIError
+            from .ai.local import check_local_ready
+
+            try:
+                await asyncio.to_thread(check_local_ready, self.settings)
+            except AIError:
+                raise ConsoleError(
+                    "本地推理尚未准备好：需要 Apple Silicon、local 依赖和已下载模型。"
+                    "请查看「本地模型」的安装说明。"
+                ) from None
         if command == "login":
             self.login_started = time.time()
         self.process = await asyncio.create_subprocess_exec(
@@ -318,12 +327,11 @@ async def serve(path, host="127.0.0.1", port=8765):
         display_host = "127.0.0.1" if host == "0.0.0.0" else host
         print(f"配置控制台：http://{display_host}:{port}/#token={console.token}", flush=True)
         try:
-            if (
-                console.settings.ai.model
-                and console.settings.ai.api_key.get_secret_value()
-                and (console.settings.data_dir / "auth.json").exists()
-            ):
-                await console._start()
+            if console.settings.ai_ready and (console.settings.data_dir / "auth.json").exists():
+                try:
+                    await console._start()
+                except ConsoleError as error:
+                    console.state, console.message = "error", str(error)
             await stop.wait()
         finally:
             console.closing = True

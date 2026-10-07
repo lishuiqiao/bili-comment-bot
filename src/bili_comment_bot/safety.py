@@ -58,6 +58,7 @@ def evidence_data(evidence: VideoEvidence | None) -> dict | None:
         "sources": evidence.sources,
         "scope_cids": evidence.scope_cids,
         "parts": [part.model_dump() for part in evidence.parts],
+        "visual_parts": [part.model_dump() for part in evidence.visual_parts],
         "coverage": evidence.coverage,
         "limitations": evidence.limitations,
         "comments": evidence.comments,
@@ -110,6 +111,7 @@ class SafetyService:
 
     async def check_source(self, evidence: VideoEvidence) -> SafetyVerdict:
         fields = [evidence.title, evidence.description, evidence.transcript, *evidence.comments]
+        fields.extend(o.text for p in evidence.visual_parts for o in p.observations)
         for value in fields:
             reason = rule_rejection(value, self.settings)
             if reason:

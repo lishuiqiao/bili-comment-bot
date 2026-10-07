@@ -63,8 +63,18 @@ class AudioTrack(Contract):
     binding: str = "verified requested aid/cid and playback duration"
 
 
+class VideoTrack(AudioTrack):
+    format: str = "mp4"
+
+
 class VideoAPI(Reader):
     async def audio_track(self, aid: int, cid: int) -> AudioTrack | None:
+        return await self._media_track(aid, cid, "audio")
+
+    async def video_track(self, aid: int, cid: int) -> VideoTrack | None:
+        return await self._media_track(aid, cid, "video")
+
+    async def _media_track(self, aid: int, cid: int, kind: str):
         # playurl does not always echo IDs. Verify membership before the signed request,
         # compare playback duration, and validate any optional echoed IDs when present.
         details = await self.details(aid)
@@ -88,13 +98,13 @@ class VideoAPI(Reader):
             raw = dash["duration"]
             if type(raw) not in {int, float} or not math.isfinite(raw) or abs(raw - duration) > 2:
                 raise ProtocolFault()
-        audios = nullable_sequence(dash, "audio")
+        audios = nullable_sequence(dash, kind)
         candidates = []
         for entry in audios:
             entry = mapping(entry)
             codec = text(entry.get("codecs"))
             bandwidth = integer(entry.get("bandwidth"), 1)
-            if not codec.startswith("mp4a."):
+            if not codec.startswith("mp4a." if kind == "audio" else "avc1."):
                 continue  # Unsupported codecs do not get uploaded under a false format.
             if "base_url" in entry and "baseUrl" in entry and entry["base_url"] != entry["baseUrl"]:
                 raise ProtocolFault()
@@ -112,7 +122,8 @@ class VideoAPI(Reader):
                 raise ProtocolFault()  # Present but unsupported/untrusted is not "no audio".
             return None
         _, codec, url = min(candidates, key=lambda item: item[0])
-        return AudioTrack(aid=aid, cid=cid, duration=duration, codec=codec, url=url)
+        track_type = AudioTrack if kind == "audio" else VideoTrack
+        return track_type(aid=aid, cid=cid, duration=duration, codec=codec, url=url)
 
     async def details(self, aid: int) -> VideoDetails:
         data = await self.get("api", "/x/web-interface/view", {"aid": aid})

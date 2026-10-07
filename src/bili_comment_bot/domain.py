@@ -75,9 +75,15 @@ class VideoEvidence(Contract):
     comment_sample: dict = Field(default_factory=dict)
     parts: list["PartEvidence"] = Field(default_factory=list)
 
+    visual_parts: list["VisualPartEvidence"] = Field(default_factory=list)
+
     @property
     def usable(self) -> bool:
-        return self.complete and bool(self.transcript.strip()) and bool(self.sources)
+        return (
+            self.complete
+            and bool(self.transcript.strip() or self.visual_parts)
+            and bool(self.sources)
+        )
 
 
 class PartEvidence(Contract):
@@ -90,6 +96,40 @@ class PartEvidence(Contract):
     model: str = Field(default="", max_length=100)
     acquired_at: float = Field(gt=0, allow_inf_nan=False)
     limitation: str
+
+
+class VisualObservation(Contract):
+    timestamps: list[float] = Field(min_length=1, max_length=8)
+    text: str = Field(min_length=1, max_length=8000)
+
+    @model_validator(mode="after")
+    def valid_times(self):
+        import math
+
+        if (
+            any(not math.isfinite(t) or t < 0 for t in self.timestamps)
+            or self.timestamps != sorted(set(self.timestamps))
+            or not self.text.strip()
+        ):
+            raise ValueError("invalid frame observations")
+        return self
+
+
+class VisualPartEvidence(Contract):
+    cid: int = Field(gt=0, strict=True)
+    page: int = Field(gt=0, strict=True)
+    duration: int = Field(gt=0, strict=True)
+    source_id: str = Field(min_length=1, max_length=300)
+    model: str = Field(min_length=1, max_length=100)
+    observations: list[VisualObservation] = Field(min_length=1, max_length=64)
+    limitation: str = "sampled frames only; unobserved events and audio cannot be inferred"
+
+    @model_validator(mode="after")
+    def within_video(self):
+        times = [t for observation in self.observations for t in observation.timestamps]
+        if times != sorted(set(times)) or any(t > self.duration + 0.1 for t in times):
+            raise ValueError("frames outside video scope")
+        return self
 
 
 class VideoScore(Contract):

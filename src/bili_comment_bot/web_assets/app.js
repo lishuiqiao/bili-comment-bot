@@ -9,10 +9,14 @@ const groups = {
   publishing: ['发布控制','PUBLISHING','默认模拟演练。真实发布需要关闭模拟，并开启发布许可。'],
   evidence: ['字幕与证据','UNDERSTANDING','设置视频理解范围、字幕语言和内容缓存。'],
   transcription: ['音频转写','TRANSCRIPTION','无字幕时的独立转写服务；在「字幕与证据」中开启。'],
+  local: ['本地模型','ON DEVICE','Apple Silicon 原生推理：语音、视觉和文本任务串行执行，每次完成后释放模型。'],
+  vision: ['画面理解','VISION','均匀抽取各分 P 的画面，结合字幕或语音理解视频；抽样可能遗漏短暂事件。'],
   runtime: ['运行调度','RUNTIME','控制处理批次、状态更新与安全停止的等待时间。'],
   general: ['存储与安全','WORKSPACE','管理运行数据位置，以及额外拦截的敏感词。']
 };
 const labels = {
+  backend:'推理方式',speech_model:'本地语音模型',memory_gb:'MLX 内存预算（GB）',context_tokens:'上下文总 Token 上限',
+  enabled:'开启画面理解',max_frames:'整个视频最大帧数',frames_per_batch:'每批画面数',long_edge:'画面最长边（像素）',download_timeout:'视频下载超时（秒）',
   name:'机器人名字',personality:'性格描述',warmth:'温暖程度',humor:'幽默感',empathy:'共情程度',
   base_url:'服务地址',model:'模型名称',api_key:'API 密钥',temperature:'采样温度',timeout:'超时（秒）',
   max_tokens:'最大输出 Token',token_parameter:'Token 参数名称',structured_output:'结构化输出方式',
@@ -32,6 +36,11 @@ const labels = {
   shutdown_timeout:'安全停止等待（秒）',status_interval:'状态更新间隔（秒）',data_dir:'数据目录',unsafe_words:'额外拦截词'
 };
 const hints = {
+  backend:'api 使用已配置的服务；local_mlx 使用本机模型，无需服务地址和 API 密钥。',
+  memory_gb:'约 20GB 可分配内存建议保留 4GB 余量。此项限制 MLX 分配，不是整机内存硬上限。',
+  context_tokens:'输入（含图片 Token）与输出的总预算；超限会停止，不会截断后假装完整理解。',
+  max_frames:'所有分 P 共用此预算；按分 P 均分，并在各段内均匀采样。',
+  enabled:'使用本地视觉模型；首次需安装本地依赖并下载模型。视频下载仍需联网。',
   name:'用于回复中的身份表达，不修改 B 站昵称。',personality:'描述你希望的语气、性格和陪伴方式。',
   bot_uid:'0 表示使用扫码账号；其他值必须与实际登录账号一致。',
   api_key:'留空保留已保存的密钥。密钥不会显示在页面或接口响应中。',
@@ -45,7 +54,7 @@ const hints = {
   publish_enabled:'只有同时关闭模拟演练才会真实发送；保存会重启运行中的机器人。',
   allow_insecure_http:'只在明确需要的可信内网服务中使用；传输不加密。',
   language:'两位语言代码，例如 zh；留空让服务自动识别。',
-  transcription_enabled:'开启后请到「音频转写」填写服务地址和独立密钥。'
+  transcription_enabled:'开启后在「音频转写」选择本地推理，或填写 API 服务和独立密钥。'
 };
 let token = new URLSearchParams(location.hash.slice(1)).get('token') || sessionStorage.getItem('bot-console-token') || '';
 history.replaceState(null,'',location.pathname);
@@ -83,6 +92,19 @@ function render(){
   const schema=section==='general'?data.schema:data.schema.$defs[data.schema.properties[section].$ref.split('/').pop()];
   const entries=Object.entries(schema.properties).filter(([key])=>section!=='general'||['data_dir','unsafe_words'].includes(key));
   $('field-count').textContent=`${entries.length} 项设置`;$('fields').replaceChildren();controls.clear();
+  if(section==='local'){
+    const card=document.createElement('div');card.className='field';
+    const copy=document.createElement('div');const title=document.createElement('strong');title.textContent='20GB 统一内存推荐配置';
+    const hint=document.createElement('small');hint.textContent='4B 视觉与文本模型 + Whisper Turbo；每批 4 帧，最多 24 帧。先安装：uv sync --extra local；再下载：uv run --extra local bili-comment-bot prepare-local-models。推理不调用云端模型，B 站采集仍需联网。';copy.append(title,hint);
+    const button=document.createElement('button');button.type='button';button.textContent='应用本地方案';button.disabled=busy;
+    button.onclick=()=>{
+      draft.ai.backend='local_mlx';draft.ai.max_tokens=1800;draft.ai.retries=0;
+      draft.transcription.backend='local_mlx';draft.evidence.transcription_enabled=true;
+      draft.local={model:'mlx-community/Qwen3-VL-4B-Instruct-4bit',speech_model:'mlx-community/whisper-large-v3-turbo',memory_gb:16,timeout:900,context_tokens:8192};
+      draft.vision={enabled:true,max_frames:24,frames_per_batch:4,long_edge:768,max_tokens:600,download_timeout:120};
+      changed();render();notice('本地方案已填入，保存后生效。请先完成依赖安装和模型下载。');
+    };card.append(copy,button);$('fields').append(card);
+  }
   for(const [key,rule] of entries){
     const path=section==='general'?key:`${section}.${key}`,value=section==='general'?draft[key]:draft[section][key];
     const row=document.createElement('div');row.className='field';const copy=document.createElement('div');
@@ -91,7 +113,7 @@ function render(){
     const range=(rule.minimum!==undefined?`最小 ${rule.minimum}`:rule.exclusiveMinimum!==undefined?`大于 ${rule.exclusiveMinimum}`:'')+(rule.maximum!==undefined?` · 最大 ${rule.maximum}`:'');
     hint.textContent=hints[key]||range||'保存后应用到机器人。';copy.append(label,hint);
     const wrap=document.createElement('div');let input;
-    if(rule.enum){input=document.createElement('select');for(const item of rule.enum){const option=document.createElement('option');option.value=item;option.textContent=item;input.append(option);}input.value=value;}
+    if(rule.enum||rule.const!==undefined){input=document.createElement('select');for(const item of (rule.enum||[rule.const])){const option=document.createElement('option');option.value=item;option.textContent=({api:'API 服务',local_mlx:'本机 MLX'})[item]||item;input.append(option);}input.value=value;}
     else if(rule.type==='array'||key==='personality'){input=document.createElement('textarea');input.value=Array.isArray(value)?value.join('\n'):value;}
     else{input=document.createElement('input');input.type=rule.type==='boolean'?'checkbox':rule.type==='number'||rule.type==='integer'?'number':key==='api_key'?'password':'text';
       if(input.type==='checkbox')input.checked=value;else input.value=value??'';

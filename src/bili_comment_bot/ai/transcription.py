@@ -27,13 +27,20 @@ class TranscriptSegment(AIContract):
 
 
 class TranscriptResult(AIContract):
-    text: str = Field(min_length=1, max_length=200000)
+    speech_present: bool = True
+    text: str = Field(max_length=200000)
     language: str = Field(pattern=r"^[A-Za-z-]{1,80}$")
     duration: float = Field(gt=0, allow_inf_nan=False)
-    segments: list[TranscriptSegment] = Field(min_length=1, max_length=20000)
+    segments: list[TranscriptSegment] = Field(max_length=20000)
 
     @model_validator(mode="after")
     def ordered_segments(self):
+        if not self.speech_present:
+            if self.text or self.segments:
+                raise ValueError("silence cannot contain speech")
+            return self
+        if not self.segments:
+            raise ValueError("speech requires segments")
         previous = -1.0
         for segment in self.segments:
             if (

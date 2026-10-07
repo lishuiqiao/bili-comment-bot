@@ -19,6 +19,14 @@ dependencies = [
   "qrcode[pil]>=8,<9",
 ]
 
+[project.optional-dependencies]
+local = [
+  "mlx-vlm>=0.3.3,<0.5; sys_platform == 'darwin' and platform_machine == 'arm64'",
+  "mlx-whisper>=0.4.3,<0.5; sys_platform == 'darwin' and platform_machine == 'arm64'",
+  "av>=14,<17",
+  "numpy>=2,<3",
+]
+
 [project.scripts]
 bili-comment-bot = "bili_comment_bot.__main__:main"
 

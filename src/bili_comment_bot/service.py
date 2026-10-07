@@ -188,7 +188,7 @@ class BusinessService:
                 invite_uids=self.settings.discovery.invite_uids,
                 policy_version=POLICY_VERSION,
                 prompt_version=PROMPT_VERSION,
-                model=self.settings.ai.model,
+                model=self.settings.ai_model_id,
             )
             await self.store.put_workflow(key, flow.model_dump_json())
             flow = DiscoveryWorkflow.model_validate_json(await self.store.workflow(key))

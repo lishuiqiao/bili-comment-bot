@@ -312,7 +312,7 @@ async def evaluate(
     }
     return {
         "mode": mode,
-        "model": settings.ai.model if mode == "real" else None,
+        "model": settings.ai_model_id if mode == "real" else None,
         "prompt_version": PROMPT_VERSION,
         "policy_version": POLICY_VERSION,
         "dataset_version": DATASET_VERSION,

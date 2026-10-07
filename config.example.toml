@@ -18,6 +18,7 @@ max_pages = 20
 history_lookback_seconds = 3600 # 首次启动仅处理最近一小时；边界在首次 HTTP 前持久化
 
 [ai]
+backend = "api" # 或 local_mlx；本地模型在 [local] 设置
 base_url = "https://api.openai.com/v1"
 model = "" # 或用 BILI_BOT_AI_MODEL 环境变量
 temperature = 0.7 # 模型采样；与 persona.warmth 分开
@@ -53,10 +54,11 @@ transcription_enabled = false
 transcription_model = "whisper-1"
 subtitle_languages = ["zh-CN", "ai-zh", "zh-Hans", "en"] # 依次优先；处理整个视频全部分 P
 comment_sample_size = 20 # 热门评论样本；不代表全部观众
-max_download_mb = 64 # 整部视频累计字幕+音频下载预算
+max_download_mb = 64 # 整部视频累计字幕+音频+画面视频下载预算
 max_text_chars = 60000
 
 [transcription]
+backend = "api" # 或 local_mlx，无需转写密钥
 base_url = "https://api.openai.com/v1" # 独立转写服务；新安装在网页填写密钥，旧部署可用环境变量导入
 language = "zh" # ISO-639-1 提示；空字符串由服务自动识别
 timeout = 120
@@ -72,3 +74,19 @@ worker_interval = 2
 batch_size = 20 # 每个处理入口一次最多认领；不一次排空历史
 shutdown_timeout = 30 # 停止接收新工作后，最多等待在途任务的秒数
 status_interval = 10
+
+# Apple Silicon 原生运行；推荐在网页「本地模型」应用 20GB 方案。
+[local]
+model = "mlx-community/Qwen3-VL-4B-Instruct-4bit"
+speech_model = "mlx-community/whisper-large-v3-turbo"
+memory_gb = 16 # MLX 分配预算；不是整个进程/系统的硬上限
+timeout = 900 # 每个本地任务，排队不占用模型执行时间
+context_tokens = 8192 # 输入含图片 + 输出；超限明确失败，不截断
+
+[vision]
+enabled = false
+max_frames = 24 # 所有分 P 共用，均分到各 P 后在段内均匀采样
+frames_per_batch = 4
+long_edge = 768
+max_tokens = 600
+download_timeout = 120

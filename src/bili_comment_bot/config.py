@@ -41,6 +41,7 @@ class PlatformConfig(ConfigModel):
 
 
 class AIConfig(ConfigModel):
+    backend: Literal["api", "local_mlx"] = "api"
     base_url: str = "https://api.openai.com/v1"
     model: str = Field(default="", max_length=100)
     api_key: SecretStr = SecretStr("")
@@ -89,6 +90,7 @@ class Limits(ConfigModel):
 
 
 class TranscriptionConfig(ConfigModel):
+    backend: Literal["api", "local_mlx"] = "api"
     base_url: str = "https://api.openai.com/v1"
     api_key: SecretStr = SecretStr("")
     language: str = Field(default="zh", pattern=r"^(?:[a-z]{2})?$", max_length=2)
@@ -148,6 +150,29 @@ class EvidenceConfig(ConfigModel):
     comment_sample_size: int = Field(default=20, ge=1, le=100)
 
 
+class LocalConfig(ConfigModel):
+    # Restrict to reviewed model families; never execute remote model code.
+    model: Literal[
+        "mlx-community/Qwen3-VL-4B-Instruct-4bit",
+        "mlx-community/Qwen3-VL-8B-Instruct-4bit",
+    ] = "mlx-community/Qwen3-VL-4B-Instruct-4bit"
+    speech_model: Literal["mlx-community/whisper-large-v3-turbo"] = (
+        "mlx-community/whisper-large-v3-turbo"
+    )
+    memory_gb: int = Field(default=16, ge=6, le=20)
+    timeout: float = Field(default=900, ge=30, le=3600)
+    context_tokens: int = Field(default=8192, ge=2048, le=16384)
+
+
+class VisionConfig(ConfigModel):
+    enabled: bool = False
+    max_frames: int = Field(default=24, ge=1, le=64)
+    frames_per_batch: int = Field(default=4, ge=1, le=8)
+    long_edge: int = Field(default=768, ge=224, le=1024)
+    max_tokens: int = Field(default=600, ge=100, le=1200)
+    download_timeout: float = Field(default=120, ge=20, le=300)
+
+
 class Settings(ConfigModel):
     data_dir: Path = Path("data")
     persona: Persona = Field(default_factory=Persona)
@@ -158,8 +183,28 @@ class Settings(ConfigModel):
     publishing: Publishing = Field(default_factory=Publishing)
     evidence: EvidenceConfig = Field(default_factory=EvidenceConfig)
     transcription: TranscriptionConfig = Field(default_factory=TranscriptionConfig)
+    local: LocalConfig = Field(default_factory=LocalConfig)
+    vision: VisionConfig = Field(default_factory=VisionConfig)
     runtime: RuntimeConfig = Field(default_factory=RuntimeConfig)
     unsafe_words: list[str] = Field(default_factory=list)
+
+    @property
+    def ai_ready(self) -> bool:
+        return self.ai.backend == "local_mlx" or bool(
+            self.ai.model and self.ai.api_key.get_secret_value()
+        )
+
+    @property
+    def ai_model_id(self) -> str:
+        return self.local.model if self.ai.backend == "local_mlx" else self.ai.model
+
+    @property
+    def transcription_model_id(self) -> str:
+        return (
+            self.local.speech_model
+            if self.transcription.backend == "local_mlx"
+            else self.evidence.transcription_model
+        )
 
     @property
     def namespace(self) -> str:

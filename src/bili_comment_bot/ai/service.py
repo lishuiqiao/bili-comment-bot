@@ -62,7 +62,14 @@ class AIService:
                 frozenset({"transcription"}): "音频转写",
                 frozenset({"subtitle", "transcription"}): "字幕与音频转写",
             }[frozenset(kinds)]
-            output += f"\n（依据全视频 {scope} {label}；未分析画面。）"
+            if evidence.visual_parts:
+                spoken = label + "与" if evidence.parts else ""
+                output += f"\n（依据 {scope} {spoken}抽样画面；可能遗漏帧间内容。"
+                if len(evidence.parts) < len(evidence.scope_cids):
+                    output += "部分或全部语音无证据，不推断音频内容。"
+                output += "）"
+            else:
+                output += f"\n（依据全视频 {scope} {label}；未分析画面。）"
         return output
 
     async def rate(self, evidence: VideoEvidence) -> tuple[VideoScore, dict]:

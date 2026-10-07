@@ -19,12 +19,21 @@ class AIError(RuntimeError):
 
 
 class AIClient:
-    def __init__(self, settings: Settings, transport=None):
+    def __init__(self, settings: Settings, transport=None, local_runner=None):
         config = settings.ai
-        if not config.model or not config.api_key.get_secret_value():
+        if not settings.ai_ready:
             raise AIError("configuration_missing")
-        if config.base_url.startswith("http:") and not config.allow_insecure_http:
+        if (
+            config.backend == "api"
+            and config.base_url.startswith("http:")
+            and not config.allow_insecure_http
+        ):
             raise AIError("insecure_endpoint_disabled")
+        self.local_runner = local_runner
+        if config.backend == "local_mlx" and self.local_runner is None:
+            from .local import LocalRunner
+
+            self.local_runner = LocalRunner(settings)
         self.settings = settings
         self.semaphore = asyncio.Semaphore(settings.limits.concurrency)
         self.calls = deque()
@@ -74,7 +83,7 @@ class AIClient:
                 },
             }
         try:
-            async with asyncio.timeout(config.timeout):
+            async with asyncio.timeout(None if config.backend == "local_mlx" else config.timeout):
                 async with self.semaphore:
                     for attempt in range(config.retries + 1):
                         now = time.monotonic()
@@ -129,6 +138,28 @@ class AIClient:
 
     async def _request(self, payload):
         config = self.settings.ai
+        if config.backend == "local_mlx":
+            content = await self.local_runner.run(
+                "complete",
+                {
+                    "messages": payload["messages"],
+                    "max_tokens": config.max_tokens,
+                    "temperature": config.temperature if config.send_temperature else 0,
+                },
+            )
+            if not isinstance(content, str) or len(content.encode()) > config.max_response_bytes:
+                raise AIError("invalid_local_completion")
+            return {
+                "choices": [
+                    {
+                        "finish_reason": "stop",
+                        "message": {
+                            "role": "assistant",
+                            "content": content,
+                        },
+                    }
+                ]
+            }
         async with self.client.stream(
             "POST",
             config.base_url + "/chat/completions",

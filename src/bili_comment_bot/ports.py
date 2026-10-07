@@ -13,7 +13,13 @@ from .domain import (
 
 if TYPE_CHECKING:
     from .adapters.bilibili.collection import AtPage, DmPage, SessionPage
-    from .adapters.bilibili.video import AudioTrack, CommentSample, SubtitleTrack, VideoDetails
+    from .adapters.bilibili.video import (
+        AudioTrack,
+        CommentSample,
+        SubtitleTrack,
+        VideoDetails,
+        VideoTrack,
+    )
     from .ai.transcription import TranscriptResult
 
 
@@ -55,3 +61,5 @@ class VideoPort(Protocol):
     async def subtitle_tracks(self, aid: int, cid: int) -> list[SubtitleTrack]: ...
 
     async def audio_track(self, aid: int, cid: int) -> AudioTrack | None: ...
+
+    async def video_track(self, aid: int, cid: int) -> VideoTrack | None: ...

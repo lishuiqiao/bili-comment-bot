@@ -319,11 +319,20 @@ async def run_bot(settings, *, once=False, io=None, stop=None, install_signals=T
         settings = settings.model_copy(update={"data_dir": lock.directory})
         async with AsyncExitStack() as resources:
             # Validate providers before contacting Bilibili. No clients survive partial init.
-            model = AIClient(settings, io.model)
+            from .ai.local import LocalRunner, LocalTranscriber, check_local_ready
+            from .ai.vision import VisionClient
+
+            await asyncio.to_thread(check_local_ready, settings)
+            local = LocalRunner(settings)
+            model = AIClient(settings, io.model, local_runner=local)
             resources.push_async_callback(model.close)
             transcriber = None
             if settings.evidence.transcription_enabled:
-                transcriber = TranscriptionClient(settings, io.transcription)
+                transcriber = (
+                    LocalTranscriber(settings, local)
+                    if settings.transcription.backend == "local_mlx"
+                    else TranscriptionClient(settings, io.transcription)
+                )
                 resources.push_async_callback(transcriber.close)
             db_path = settings.data_dir / "state.db"
             descriptor = os.open(db_path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
@@ -353,12 +362,21 @@ async def run_bot(settings, *, once=False, io=None, stop=None, install_signals=T
             )
             platform = BilibiliClient(settings, transport, auth, store)
             downloader = Downloader(
-                settings.platform.request_timeout,
+                settings.vision.download_timeout
+                if settings.vision.enabled
+                else settings.platform.request_timeout,
                 settings.evidence.max_download_mb * 1024 * 1024,
                 io.download,
             )
             resources.push_async_callback(downloader.close)
-            evidence = EvidenceService(settings, VideoAPI(platform), downloader, store, transcriber)
+            evidence = EvidenceService(
+                settings,
+                VideoAPI(platform),
+                downloader,
+                store,
+                transcriber,
+                VisionClient(settings, local) if settings.vision.enabled else None,
+            )
             resources.push_async_callback(evidence.close)
             scheduler = None
             alive, ready = True, False
