@@ -2,14 +2,14 @@
 <html lang="zh-CN">
 <head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>B站评论机器人 · 配置控制台</title><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
 <body>
-<header><a class="brand" href="/" aria-label="B站评论机器人首页"><span class="mark">B</span> B站评论机器人<span class="brand-sub">控制台</span></a><span class="local">● &nbsp; 私密配置 · 本地运行</span></header>
-<div class="layout"><aside><div class="nav-label">工作空间</div><nav id="nav" aria-label="配置分组"></nav><div class="aside-note">一点性格。<br>更多陪伴。<small>BILIBILI COMPANION</small></div></aside>
-<main><section class="hero"><div class="eyebrow">MAKE IT YOURS</div><h1>让陪伴，<br><span>恰如其分。</span></h1><p>从一句问候，到发现下一个好视频。<br>在这里，塑造属于你的机器人。</p><div class="orb" aria-hidden="true"><span>B</span></div></section>
-<section id="access" class="card" hidden><h2>连接你的控制台</h2><p>打开启动日志中的完整链接，或输入其中的访问令牌。</p><div class="access-row"><input id="token" type="password" placeholder="访问令牌" aria-label="访问令牌"><button id="connect" class="primary">连接</button></div></section>
-<div id="workspace" hidden><section class="status-grid"><article class="status-card"><span class="caption">运行状态</span><strong id="state">等待连接</strong><small id="message"></small></article><article class="status-card"><span class="caption">发布模式</span><strong id="mode">模拟演练</strong><small>发布模式由两项安全开关共同决定</small></article><article class="status-card"><span class="caption">账号与服务</span><div class="actions"><button id="login">扫码登录</button><button id="start" class="primary">启动</button><button id="stop">停止</button></div><small>登录会先安全停止机器人</small></article></section>
+<header><a class="brand" href="/" aria-label="B站评论机器人首页"><span class="mark">B</span> B站评论机器人<span class="brand-sub">控制台</span></a><span class="local">● &nbsp; 本地运行</span></header>
+<div class="layout"><aside><div class="nav-label">工作空间</div><nav id="nav" aria-label="配置分组"></nav></aside>
+<main><section class="hero"><div class="eyebrow">CONTROL CENTER</div><h1>配置，一目了然。</h1><div class="orb" aria-hidden="true"><span>B</span></div></section>
+<section id="access" class="card" hidden><h2>连接控制台</h2><p>输入启动时提供的访问令牌。</p><div class="access-row"><input id="token" type="password" placeholder="访问令牌" aria-label="访问令牌"><button id="connect" class="primary">连接</button></div></section>
+<div id="workspace" hidden><section class="status-grid"><article class="status-card"><span class="caption">运行状态</span><strong id="state">等待连接</strong><small id="message"></small></article><article class="status-card"><span class="caption">发布模式</span><strong id="mode">模拟演练</strong></article><article class="status-card"><span class="caption">账号与服务</span><div class="actions"><button id="login">扫码登录</button><button id="start" class="primary">启动</button><button id="stop">停止</button></div></article></section>
 <section id="qr-card" class="card" hidden><h2>用哔哩哔哩 App 扫码</h2><p>扫码后请在手机确认。二维码过期时，重新点击扫码登录。</p><img id="qr" alt="等待生成登录二维码" width="210" height="210"></section>
-<section class="editor"><div class="section-heading"><div><div class="eyebrow" id="section-kicker">PERSONALITY</div><h2 id="section-title">人格与表达</h2><p id="section-description"></p></div><span id="field-count" class="pill"></span></div><form id="form"><div id="fields" class="fields"></div></form></section>
-<footer class="save-bar"><span id="save-state">所有更改仅在保存后生效</span><div><button id="reset">放弃更改</button><button id="save" class="primary">保存配置 <span aria-hidden="true">↗</span></button></div></footer></div>
-<div id="notice" role="status" aria-live="polite" hidden></div><div class="footnote">B站评论机器人 · 配置控制台 <span>为每一次有温度的连接。</span></div>
+<section class="editor"><div class="section-heading"><div><div class="eyebrow" id="section-kicker">PERSONALITY</div><h2 id="section-title">人格与表达</h2><p id="section-description" hidden></p></div><button id="help-toggle" type="button" aria-pressed="false" aria-controls="fields section-description">显示说明</button></div><form id="form"><div id="fields" class="fields"></div></form></section>
+<footer class="save-bar"><span id="save-state">已同步</span><div><button id="reset">还原</button><button id="save" class="primary">保存更改</button></div></footer></div>
+<div id="notice" role="status" aria-live="polite" hidden></div>
 </main></div>
 </body></html>

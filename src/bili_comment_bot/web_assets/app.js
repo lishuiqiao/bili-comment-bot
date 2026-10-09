@@ -59,7 +59,7 @@ const hints = {
 let token = new URLSearchParams(location.hash.slice(1)).get('token') || sessionStorage.getItem('bot-console-token') || '';
 history.replaceState(null,'',location.pathname);
 let latestState;
-let data, draft, section = 'persona', dirty = false, busy = false, qrUrl;
+let data, draft, section = 'persona', dirty = false, busy = false, qrUrl, showHelp = false;
 const controls = new Map();
 function notice(text){$('notice').textContent=text;$('notice').hidden=false;}
 async function api(path, body){
@@ -76,7 +76,7 @@ async function api(path, body){
   }
   return value;
 }
-function changed(){dirty=true;$('save-state').textContent='有未保存的更改';$('notice').hidden=true;}
+function changed(){dirty=true;$('save-state').textContent='未保存';$('notice').hidden=true;}
 function selectSection(key){section=key;render();}
 function render(){
   if(!draft)return;
@@ -91,12 +91,13 @@ function render(){
   $('section-title').textContent=title;$('section-kicker').textContent=kicker;$('section-description').textContent=description;
   const schema=section==='general'?data.schema:data.schema.$defs[data.schema.properties[section].$ref.split('/').pop()];
   const entries=Object.entries(schema.properties).filter(([key])=>section!=='general'||['data_dir','unsafe_words'].includes(key));
-  $('field-count').textContent=`${entries.length} 项设置`;$('fields').replaceChildren();controls.clear();
+  $('fields').replaceChildren();controls.clear();
   if(section==='local'){
     const card=document.createElement('div');card.className='field';
-    const copy=document.createElement('div');const title=document.createElement('strong');title.textContent='20GB 统一内存推荐配置';
-    const hint=document.createElement('small');hint.textContent='4B 视觉与文本模型 + Whisper Turbo；每批 4 帧，最多 24 帧。先安装：uv sync --extra local；再下载：uv run --extra local bili-comment-bot prepare-local-models。推理不调用云端模型，B 站采集仍需联网。';copy.append(title,hint);
-    const button=document.createElement('button');button.type='button';button.textContent='应用本地方案';button.disabled=busy;
+    const copy=document.createElement('div');const title=document.createElement('strong');title.textContent='20GB 推荐方案';
+    const hint=document.createElement('small');hint.textContent='Qwen 4B · Whisper Turbo';copy.append(title,hint);
+    const setup=document.createElement('details');const summary=document.createElement('summary');summary.textContent='安装说明';const instructions=document.createElement('small');instructions.textContent='先安装：uv sync --extra local；再下载：uv run --extra local bili-comment-bot prepare-local-models。模型推理在本机完成，视频采集仍需联网。';setup.append(summary,instructions);copy.append(setup);
+    const button=document.createElement('button');button.type='button';button.textContent='应用方案';button.disabled=busy;
     button.onclick=()=>{
       draft.ai.backend='local_mlx';draft.ai.max_tokens=1800;draft.ai.retries=0;
       draft.transcription.backend='local_mlx';draft.evidence.transcription_enabled=true;
@@ -111,7 +112,7 @@ function render(){
     const label=document.createElement('label');label.htmlFor=path;label.textContent=labels[key]||key;
     const hint=document.createElement('small');hint.id=`${path}-hint`;
     const range=(rule.minimum!==undefined?`最小 ${rule.minimum}`:rule.exclusiveMinimum!==undefined?`大于 ${rule.exclusiveMinimum}`:'')+(rule.maximum!==undefined?` · 最大 ${rule.maximum}`:'');
-    hint.textContent=hints[key]||range||'保存后应用到机器人。';copy.append(label,hint);
+    hint.textContent=hints[key]||range;hint.className='field-hint';hint.hidden=!showHelp||!hint.textContent;copy.append(label,hint);
     const wrap=document.createElement('div');let input;
     if(rule.enum||rule.const!==undefined){input=document.createElement('select');for(const item of (rule.enum||[rule.const])){const option=document.createElement('option');option.value=item;option.textContent=({api:'API 服务',local_mlx:'本机 MLX'})[item]||item;input.append(option);}input.value=value;}
     else if(rule.type==='array'||key==='personality'){input=document.createElement('textarea');input.value=Array.isArray(value)?value.join('\n'):value;}
@@ -140,13 +141,13 @@ function showState(value){
   const states={stopped:'已停止',running:'运行中',stopping:'正在停止',login:'等待扫码',error:'需要处理'};
   $('state').textContent=states[value.state]||value.state;
   if(value.state==='running'&&value.status&&!value.status.healthy)$('state').textContent='启动中 / 需要关注';
-  $('message').textContent=value.message;$('mode').textContent=value.mode==='live'?'真实发布':'模拟演练';
+  $('message').textContent=value.message;$('message').hidden=!(['error','login','stopping'].includes(value.state)||(value.status&&!value.status.healthy));$('mode').textContent=value.mode==='live'?'真实发布':'模拟演练';
   $('qr-card').hidden=value.state!=='login';
   $('start').disabled=busy||['running','login','stopping'].includes(value.state);
   $('stop').disabled=busy||!['running','login','stopping'].includes(value.state);
 }
 async function load(){
-  try{data=await api('/api/state');draft=structuredClone(data.settings);dirty=false;sessionStorage.setItem('bot-console-token',token);$('access').hidden=true;$('workspace').hidden=false;$('notice').hidden=true;$('save-state').textContent='所有更改仅在保存后生效';render();showState(data);}
+  try{data=await api('/api/state');draft=structuredClone(data.settings);dirty=false;sessionStorage.setItem('bot-console-token',token);$('access').hidden=true;$('workspace').hidden=false;$('notice').hidden=true;$('save-state').textContent='已同步';render();showState(data);}
   catch(error){notice(error.message);if(!data)$('access').hidden=false;}
 }
 async function action(route,body={}){
@@ -158,6 +159,7 @@ async function action(route,body={}){
   }catch(error){notice(error.message);}
   finally{busy=false;$('form').inert=false;for(const input of $('form').querySelectorAll('input,textarea,select,button'))input.disabled=false;for(const id of ['save','reset','login'])$(id).disabled=false;if(latestState)showState(latestState);}
 }
+$('help-toggle').onclick=()=>{showHelp=!showHelp;$('help-toggle').textContent=showHelp?'收起说明':'显示说明';$('help-toggle').setAttribute('aria-pressed',String(showHelp));$('section-description').hidden=!showHelp;render();};
 $('connect').onclick=()=>{token=$('token').value.trim();load();};
 $('token').onkeydown=event=>{if(event.key==='Enter')$('connect').click();};
 $('form').onsubmit=event=>event.preventDefault();
