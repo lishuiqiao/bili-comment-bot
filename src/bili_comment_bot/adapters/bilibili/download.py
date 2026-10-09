@@ -76,6 +76,8 @@ class Downloader:
     async def fetch(self, url: str, *, max_bytes: int | None = None, hosts=SUBTITLE_HOSTS) -> bytes:
         url = checked_url(url, hosts)
         limit = min(self.max_bytes, max_bytes) if max_bytes is not None else self.max_bytes
+        if limit <= 0:
+            raise ProtocolFault()
         try:
             async with asyncio.timeout(self.timeout):
                 async with self.client.stream(
@@ -91,6 +93,11 @@ class Downloader:
                 ) as response:
                     if response.status_code != 200:
                         raise HTTPFault(response.status_code)
+                    length = response.headers.get("Content-Length", "")
+                    if length.isascii() and length.isdecimal():
+                        digits = length.lstrip("0") or "0"
+                        if len(digits) > 20 or int(digits) > limit:
+                            raise ProtocolFault()
                     result = bytearray()
                     async for chunk in response.aiter_bytes(chunk_size=65536):
                         result.extend(chunk)

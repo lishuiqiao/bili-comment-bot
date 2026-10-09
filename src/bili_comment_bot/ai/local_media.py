@@ -31,17 +31,22 @@ def sample_frames(path, duration, count, long_edge):
         for index in range(count):
             target = duration * (index + 0.5) / count
             container.seek(int(target / stream.time_base), stream=stream, backward=True)
+            candidate = None
             for frame in container.decode(stream):
                 if frame.pts is None:
                     raise ValueError("missing frame timestamp")
                 stamp = float(frame.pts * stream.time_base)
                 if not math.isfinite(stamp) or not 0 <= stamp <= duration + 0.1:
                     raise ValueError("invalid frame timestamp")
-                if stamp < target:
-                    continue
+                if not 0 < frame.width <= 4096 or not 0 < frame.height <= 4096:
+                    raise ValueError("invalid decoded geometry")
+                candidate = (frame, stamp)
+                if stamp >= target:
+                    break
+            # Low-FPS clips may end before every target, but their final frame is valid.
+            if candidate is not None:
+                frame, stamp = candidate
                 if not times or stamp > times[-1]:
-                    if not 0 < frame.width <= 4096 or not 0 < frame.height <= 4096:
-                        raise ValueError("invalid decoded geometry")
                     scale = min(1, long_edge / max(frame.width, frame.height))
                     image = frame.reformat(
                         width=max(1, int(frame.width * scale)),
@@ -50,7 +55,6 @@ def sample_frames(path, duration, count, long_edge):
                     ).to_image()
                     frames.append(image)
                     times.append(stamp)
-                break
         if not frames:
             raise ValueError("no decodable samples")
     return frames, times

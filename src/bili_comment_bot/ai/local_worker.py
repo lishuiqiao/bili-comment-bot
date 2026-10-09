@@ -5,13 +5,17 @@ import os
 import sys
 from pathlib import Path
 
+from .local_errors import LocalWorkerError
 from .local_media import decode_audio, sample_frames
 
 
 def checkpoint(repo):
     from huggingface_hub import snapshot_download
 
-    return snapshot_download(repo, local_files_only=True)
+    try:
+        return snapshot_download(repo, local_files_only=True)
+    except Exception:
+        raise LocalWorkerError("local_models_not_prepared") from None
 
 
 def load_vlm(local):
@@ -35,7 +39,7 @@ def generate_text(model, processor, messages, images, local, max_tokens, tempera
         image_token_index=getattr(model.config, "image_token_index", None),
     )
     if inputs["input_ids"].size + max_tokens > local["context_tokens"]:
-        raise ValueError("local context budget")
+        raise LocalWorkerError("local_context_budget")
     if "attention_mask" in inputs:
         inputs["mask"] = inputs.pop("attention_mask")
     result = generate(
@@ -49,7 +53,7 @@ def generate_text(model, processor, messages, images, local, max_tokens, tempera
     )
     # A token-limited result is not a completed contract, even if it happens to parse.
     if result.generation_tokens >= max_tokens or not result.text.strip():
-        raise ValueError("incomplete local generation")
+        raise LocalWorkerError("local_completion_incomplete")
     return result.text.strip()
 
 
@@ -57,7 +61,12 @@ def transcribe(folder, request):
     import mlx_whisper
 
     payload = request["payload"]
-    waveform, duration = decode_audio(folder / "media.mp4", payload["duration"])
+    try:
+        waveform, duration = decode_audio(folder / "media.mp4", payload["duration"])
+    except (ImportError, MemoryError):
+        raise
+    except Exception:
+        raise LocalWorkerError("local_media_invalid") from None
     raw = mlx_whisper.transcribe(
         waveform,
         path_or_hf_repo=checkpoint(request["local"]["speech_model"]),
@@ -104,9 +113,14 @@ def execute(folder, request):
     if operation != "vision":
         raise ValueError("unknown local operation")
     vision = request["vision"]
-    images, times = sample_frames(
-        folder / "media.mp4", payload["duration"], payload["frames"], vision["long_edge"]
-    )
+    try:
+        images, times = sample_frames(
+            folder / "media.mp4", payload["duration"], payload["frames"], vision["long_edge"]
+        )
+    except (ImportError, MemoryError):
+        raise
+    except Exception:
+        raise LocalWorkerError("local_media_invalid") from None
     model, processor = load_vlm(request["local"])
     observations = []
     for start in range(0, len(images), vision["frames_per_batch"]):
@@ -136,7 +150,20 @@ def main():
     os.umask(0o077)
     folder = Path(sys.argv[1])
     request = json.loads((folder / "request.json").read_text())
-    result = execute(folder, request)
+    try:
+        result = execute(folder, request)
+    except Exception as error:
+        reason = (
+            error.reason
+            if isinstance(error, LocalWorkerError)
+            else "local_dependencies_missing"
+            if isinstance(error, ImportError)
+            else "local_memory_budget"
+            if isinstance(error, MemoryError)
+            else "local_inference_failed"
+        )
+        (folder / "error.json").write_text(json.dumps({"reason": reason}), encoding="utf-8")
+        raise SystemExit(1) from None
     (folder / "result.json").write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
 
 

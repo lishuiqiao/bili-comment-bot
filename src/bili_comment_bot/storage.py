@@ -74,6 +74,8 @@ CREATE TABLE IF NOT EXISTS quarantined(
  reason TEXT NOT NULL, created REAL NOT NULL,
  PRIMARY KEY(ns,kind,id));
 INSERT OR IGNORE INTO schema_version VALUES (6);
+CREATE INDEX IF NOT EXISTS cache_expiry ON cache(ns,expires,key);
+INSERT OR IGNORE INTO schema_version VALUES (7);
 """
 
 
@@ -747,10 +749,17 @@ class Store:
 
     async def cache_put(self, key: str, payload: dict, ttl: int):
         async with self.transaction() as db:
+            now = self.clock()
+            # Bounded housekeeping; never touch another mode or durable action history.
+            await db.execute(
+                "DELETE FROM cache WHERE ns=? AND key IN ("
+                "SELECT key FROM cache WHERE ns=? AND expires<=? ORDER BY expires,key LIMIT 100)",
+                (self.ns, self.ns, now),
+            )
             await db.execute(
                 "INSERT INTO cache VALUES(?,?,?,?) ON CONFLICT(ns,key) "
                 "DO UPDATE SET payload=excluded.payload,expires=excluded.expires",
-                (self.ns, key, json.dumps(payload), self.clock() + ttl),
+                (self.ns, key, json.dumps(payload), now + ttl),
             )
 
     async def counts(self) -> dict:

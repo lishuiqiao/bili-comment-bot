@@ -265,3 +265,27 @@ async def test_site_uses_public_chinese_name(console):
     assert code == 200
     assert "B站评论机器人" in body.decode()
     assert "B站评论机器人" == console.settings.persona.name
+
+
+async def test_status_poll_is_authenticated_small_and_has_no_configuration(console):
+    console.settings.persona.personality = "synthetic-private-personality"
+    console.settings.platform.bot_uid = 123456789
+    console.settings.ai.api_key = __import__("pydantic").SecretStr("synthetic-secret")
+    assert (await request(console, "/api/status", auth=False))[0] == 401
+    code, status = await request(console, "/api/status")
+    assert code == 200
+    assert set(status) == {"revision", "state", "message", "mode", "status"}
+    raw = json.dumps(status)
+    assert "synthetic-private-personality" not in raw and "123456789" not in raw
+    assert "synthetic-secret" not in raw
+    assert len(raw) < len(json.dumps(console.snapshot())) / 10
+    console.revision += 1
+    assert (await request(console, "/api/status"))[1]["revision"] == console.revision
+
+
+async def test_failed_local_restart_retains_actionable_message(console):
+    console.state = "running"
+    console._start = AsyncMock(side_effect=ConsoleError("本地模型尚未下载。"))
+    result = await console.action("/api/config", payload(console))
+    assert "本地模型尚未下载" in result["message"]
+    assert "密钥" not in result["message"]

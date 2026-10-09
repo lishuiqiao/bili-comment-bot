@@ -73,3 +73,16 @@ def test_decoder_rejects_non_mp4_and_wrong_stream_type(tmp_path):
     video(path)
     with pytest.raises(ValueError):
         decode_audio(path, 4)
+
+
+def test_single_frame_clip_can_be_sampled_without_duplicate_frames(tmp_path):
+    path = tmp_path / "single.mp4"
+    with av.open(str(path), "w") as output:
+        stream = output.add_stream("libx264", rate=1)
+        stream.width, stream.height, stream.pix_fmt = 320, 240, "yuv420p"
+        frame = av.VideoFrame.from_ndarray(np.zeros((240, 320, 3), dtype=np.uint8), format="rgb24")
+        for packet in [*stream.encode(frame), *stream.encode()]:
+            output.mux(packet)
+    images, times = sample_frames(path, 1, 24, 224)
+    assert len(images) == 1 and times == [0.0]
+    assert images[0].size == (224, 168)

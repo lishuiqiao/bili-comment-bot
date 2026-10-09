@@ -5,7 +5,9 @@ never fall back to a paid service. Process exit releases all model allocations.
 """
 
 import asyncio
+import contextlib
 import json
+import logging
 import math
 import os
 import platform
@@ -16,7 +18,15 @@ from collections import deque
 from pathlib import Path
 
 from .client import AIError
+from .local_errors import LOCAL_FAILURES
 from .transcription import TranscriptionError, TranscriptResult, check_m4a
+
+
+def local_failure(reason):
+    reason = reason if reason in LOCAL_FAILURES else "local_inference_failed"
+    # Business safety checks may consume AIError as UNKNOWN; retain a safe diagnosis.
+    logging.getLogger(__name__).warning("Local inference failed: %s", reason)
+    return AIError(reason)
 
 
 class LocalRunner:
@@ -50,29 +60,48 @@ class LocalRunner:
                     TOKENIZERS_PARALLELISM="false",
                 )
                 process = None
+                spawning = None
                 try:
                     async with asyncio.timeout(self.settings.local.timeout):
-                        process = await asyncio.create_subprocess_exec(
-                            sys.executable,
-                            "-m",
-                            "bili_comment_bot.ai.local_worker",
-                            str(folder),
-                            env=env,
-                            stdout=asyncio.subprocess.DEVNULL,
-                            stderr=asyncio.subprocess.DEVNULL,
+                        spawning = asyncio.create_task(
+                            asyncio.create_subprocess_exec(
+                                sys.executable,
+                                "-m",
+                                "bili_comment_bot.ai.local_worker",
+                                str(folder),
+                                env=env,
+                                stdout=asyncio.subprocess.DEVNULL,
+                                stderr=asyncio.subprocess.DEVNULL,
+                            )
                         )
+                        process = await asyncio.shield(spawning)
                         await process.wait()
                         output = folder / "result.json"
                         if process.returncode or not output.exists():
-                            raise AIError("local_inference_failed")
+                            reason = "local_inference_failed"
+                            failure = folder / "error.json"
+                            with contextlib.suppress(OSError, ValueError, TypeError):
+                                if failure.stat().st_size <= 1024:
+                                    error = json.loads(failure.read_text(encoding="utf-8"))
+                                    if (
+                                        isinstance(error, dict)
+                                        and isinstance(error.get("reason"), str)
+                                        and error["reason"] in LOCAL_FAILURES
+                                    ):
+                                        reason = error["reason"]
+                            raise local_failure(reason)
                         if output.stat().st_size > 4_000_000:
-                            raise AIError("local_response_budget")
+                            raise local_failure("local_response_budget")
                         return json.loads(output.read_text(encoding="utf-8"))
                 except TimeoutError:
-                    raise AIError("local_inference_timeout") from None
+                    raise local_failure("local_inference_timeout") from None
                 except (OSError, ValueError):
-                    raise AIError("local_inference_unavailable") from None
+                    raise local_failure("local_inference_unavailable") from None
                 finally:
+                    if process is None and spawning is not None:
+                        # Cancellation must not lose a process created just after the await.
+                        with contextlib.suppress(Exception):
+                            process = await spawning
                     if process is not None and process.returncode is None:
                         process.kill()
                         await process.wait()

@@ -173,7 +173,7 @@ $('login').onclick=()=>{if(dirty){notice('请先保存配置，再扫码登录�
 window.addEventListener('beforeunload',event=>{if(dirty){event.preventDefault();event.returnValue='';}});
 async function poll(){
   if(data&&!busy){try{
-    const state=await api('/api/state');showState(state);
+    const state=await api('/api/status');showState(state);
     if(state.revision!==data.revision)notice('配置已在其他页面更新。请重新加载后编辑，以免覆盖。');
     if(state.state==='login'){
       const response=await fetch('/api/qr',{headers:{Authorization:`Bearer ${token}`}});

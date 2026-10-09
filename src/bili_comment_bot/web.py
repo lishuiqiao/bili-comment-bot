@@ -61,24 +61,29 @@ class Console:
         self.revision = 0
         self.token = secrets.token_urlsafe(32)
 
-    def snapshot(self):
+    def status_snapshot(self):
         status = None
         with contextlib.suppress(OSError, ValueError, KeyError, TypeError):
             snapshot = read_status(self.settings.data_dir, self.settings.namespace)
             # The UI only needs a health indicator, never arbitrary persisted data.
             status = {"healthy": snapshot.get("healthy") is True}
         return {
+            "revision": self.revision,
+            "state": self.state,
+            "message": self.message,
+            "mode": self.settings.namespace,
+            "status": status,
+        }
+
+    def snapshot(self):
+        return {
+            **self.status_snapshot(),
             "settings": public_settings(self.settings),
             "schema": Settings.model_json_schema(),
             "secrets": {
                 name: bool(getattr(self.settings, name).api_key.get_secret_value())
                 for name in ("ai", "transcription")
             },
-            "revision": self.revision,
-            "state": self.state,
-            "message": self.message,
-            "mode": self.settings.namespace,
-            "status": status,
         }
 
     async def _watch(self, process, command):
@@ -183,8 +188,8 @@ class Console:
                 if restart:
                     try:
                         await self._start()
-                    except ConsoleError:
-                        self.message = "配置已保存；请补全模型和密钥后启动。"
+                    except ConsoleError as error:
+                        self.message = "配置已保存；" + str(error)
             elif route == "/api/start":
                 await self._start()
             elif route == "/api/stop":
@@ -244,10 +249,14 @@ def handler_for(console, loop, hosts):
         def do_GET(self):
             if not self.allowed():
                 return
-            if self.path == "/api/state":
+            if self.path in {"/api/state", "/api/status"}:
 
                 async def snapshot():
-                    return console.snapshot()
+                    return (
+                        console.status_snapshot()
+                        if self.path == "/api/status"
+                        else console.snapshot()
+                    )
 
                 result = asyncio.run_coroutine_threadsafe(snapshot(), loop).result()
                 self.reply(200, result)

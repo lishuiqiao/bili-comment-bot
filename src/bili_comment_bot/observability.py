@@ -9,6 +9,7 @@ from pathlib import Path
 
 from .adapters.bilibili.errors import AUTH_FAILURES, PlatformError
 from .ai.client import AIError
+from .ai.local_errors import LOCAL_FAILURES
 
 JOBS = {"at", "dm", "search", "events", "actions", "discovery", "refresh", "status", "runtime"}
 
@@ -46,6 +47,8 @@ def log_result(
         record["counts"] = dict(counts)
     if error is not None:
         record["error"] = error_category(error)
+        if isinstance(error, AIError) and error.reason in LOCAL_FAILURES:
+            record["error_reason"] = error.reason
     logging.getLogger("bili_comment_bot.runtime").info(json.dumps(record, sort_keys=True))
 
 

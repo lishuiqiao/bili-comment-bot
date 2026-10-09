@@ -18,3 +18,5 @@
 贡献与许可见 [贡献指南](../CONTRIBUTING.md) 和 [第三方声明](../THIRD_PARTY_NOTICES.md)。敏感信息处理见 [安全说明](../SECURITY.md)。
 
 公开文档只描述产品、接口依据和验证方法。个人笔记、调研会话和阶段过程记录存放在本地 `.local/`，不进入 Git、镜像或发行包。
+
+本轮全项目检查与实施结果见 [优化方案](optimization-plan.md)。
